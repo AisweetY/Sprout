@@ -1,0 +1,57 @@
+name: panda_ledger
+description: "熊猫记账 — 个人记账与资产管理 App"
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: ^3.12.2
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # UI
+  cupertino_icons: ^1.0.8
+
+  # 本地数据库 — Drift (SQLite)
+  drift: ^2.25.1
+  drift_flutter: ^0.2.4
+  sqlite3_flutter_libs: ^0.5.30
+
+  # 远程后端 — Supabase
+  supabase_flutter: ^2.8.3
+
+  # 状态管理 — Riverpod
+  flutter_riverpod: ^2.6.1
+
+  # 图表 — fl_chart
+  fl_chart: ^0.70.2
+
+  # 工具
+  path_provider: ^2.1.5
+  path: ^1.9.1
+  intl: ^0.20.2
+
+  # 网络请求 — DeepSeek API
+  http: ^1.2.0
+
+  # 文件分享
+  share_plus: ^10.1.4
+
+  # CSV 格式
+  csv: ^6.0.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+  # 代码生成 — 仅 Drift
+  build_runner: ^2.15.0
+  drift_dev: ^2.25.1
+
+flutter:
+  uses-material-design: true
+
+  assets:
+    - assets/icons/

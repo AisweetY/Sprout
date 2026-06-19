@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Skill(claude-api)",
+      "Skill(update-config)",
+      "WebSearch",
+      "Bash(python3 *)",
+      "Bash(python *)"
+    ]
+  }
+}

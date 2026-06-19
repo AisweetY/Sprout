@@ -1,0 +1,20 @@
+import 'models/parsed_transaction.dart';
+
+/// AI 文本解析服务抽象接口
+///
+/// 实现类：
+/// - [RuleEngine] — 本地规则引擎，正则提取金额/时间/场景词
+/// - [AiServiceStub] — 桩实现（当前版本）
+/// - 未来：CloudAiService — 调用 Claude API 等云端 LLM
+abstract class IAiParsingService {
+  /// 解析用户输入的自然语言
+  ///
+  /// [userInput] 用户说的或打的一句话
+  /// [existingCategories] 用户当前的分类列表（名称→ID 映射），AI 优先从中匹配
+  /// [existingAccounts] 用户当前的账户列表（名称→ID 映射），AI 优先从中匹配
+  Future<ParsedTransaction> parse({
+    required String userInput,
+    required Map<String, String> existingCategories,
+    required Map<String, String> existingAccounts,
+  });
+}
