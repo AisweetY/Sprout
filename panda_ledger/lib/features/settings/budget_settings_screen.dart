@@ -1,12 +1,16 @@
+import 'dart:convert';
+
 import 'package:drift/drift.dart' hide Column;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/utils/accessibility_utils.dart';
 import '../../core/utils/id_generator.dart';
+import '../../core/utils/snackbar_utils.dart';
 import '../../core/widgets/shimmer_loading.dart';
 import '../../data/local/app_database_provider.dart';
 import '../../data/local/database.dart';
+import '../../data/sync/sync_queue_dao_provider.dart';
 import '../auth/auth_provider.dart';
 import 'budget_settings_provider.dart';
 
@@ -207,20 +211,33 @@ class _BudgetSettingsScreenState extends ConsumerState<BudgetSettingsScreen> {
                   final monthStr =
                       '$_year-${_month.toString().padLeft(2, '0')}';
 
+                  final userId = ref.read(currentUserIdProvider);
                   if (data.savingGoal != null) {
                     await budgetDao.updateBudgetAmount(
                         data.savingGoal!.id, amount);
+                    _syncBudget(data.savingGoal!.id, 'update', {
+                      'id': data.savingGoal!.id,
+                      'month': monthStr,
+                      'type': 'saving_goal',
+                      'target_amount': amount,
+                    });
                   } else {
-                    final userId = ref.read(currentUserIdProvider);
+                    final newId = IdGenerator.generate();
                     await budgetDao.insertBudget(
                       BudgetsCompanion(
-                        id: Value(IdGenerator.generate()),
+                        id: Value(newId),
                         userId: Value(userId),
                         month: Value(monthStr),
                         type: const Value('saving_goal'),
                         targetAmount: Value(amount),
                       ),
                     );
+                    _syncBudget(newId, 'insert', {
+                      'id': newId,
+                      'month': monthStr,
+                      'type': 'saving_goal',
+                      'target_amount': amount,
+                    });
                   }
                   if (ctx.mounted) Navigator.of(ctx).pop();
                   _refresh();
@@ -233,26 +250,45 @@ class _BudgetSettingsScreenState extends ConsumerState<BudgetSettingsScreen> {
                   onPressed: () async {
                     final savedGoal = data.savingGoal!;
                     final budgetDao = ref.read(budgetDaoProvider);
-                    await budgetDao.deleteBudget(savedGoal.id);
+                    await budgetDao.softDeleteBudget(savedGoal.id);
+                    _syncBudget(savedGoal.id, 'update', {
+                      'id': savedGoal.id,
+                      'month': savedGoal.month,
+                      'type': 'saving_goal',
+                      'target_amount': savedGoal.targetAmount,
+                      'deleted': true,
+                      'updated_at': DateTime.now().toUtc().toIso8601String(),
+                    });
                     if (ctx.mounted) Navigator.of(ctx).pop();
                     _refresh();
-                    _showUndoSnackBar(
-                      '已删除储蓄目标',
-                      () async {
-                        // 重新创建被删除的预算
-                        final userId = ref.read(currentUserIdProvider);
-                        await budgetDao.insertBudget(
-                          BudgetsCompanion(
-                            id: Value(IdGenerator.generate()),
-                            userId: Value(userId),
-                            month: Value(savedGoal.month),
-                            type: const Value('saving_goal'),
-                            targetAmount: Value(savedGoal.targetAmount),
-                          ),
-                        );
-                        _refresh();
-                      },
-                    );
+                    if (mounted) {
+                      SnackbarUtils.showUndo(
+                        context: context,
+                        message: '已删除储蓄目标',
+                        onUndo: () async {
+                          // 重新创建被删除的预算
+                          final userId = ref.read(currentUserIdProvider);
+                          final newId = IdGenerator.generate();
+                          await budgetDao.insertBudget(
+                            BudgetsCompanion(
+                              id: Value(newId),
+                              userId: Value(userId),
+                              month: Value(savedGoal.month),
+                              type: const Value('saving_goal'),
+                              targetAmount: Value(savedGoal.targetAmount),
+                            ),
+                          );
+                          _syncBudget(newId, 'insert', {
+                            'id': newId,
+                            'month': savedGoal.month,
+                            'type': 'saving_goal',
+                            'target_amount': savedGoal.targetAmount,
+                          });
+                          _refresh();
+                        },
+                        afterDialogClose: true,
+                      );
+                    }
                   },
                   style: OutlinedButton.styleFrom(
                     foregroundColor: theme.colorScheme.error,
@@ -330,7 +366,16 @@ class _BudgetSettingsScreenState extends ConsumerState<BudgetSettingsScreen> {
                   if (text.isEmpty) {
                     // 删除预算
                     if (existing != null) {
-                      await budgetDao.deleteBudget(existing.id);
+                      await budgetDao.softDeleteBudget(existing.id);
+                      _syncBudget(existing.id, 'update', {
+                        'id': existing.id,
+                        'month': monthStr,
+                        'type': 'category_budget',
+                        'category_id': item.categoryId,
+                        'target_amount': existing.targetAmount,
+                        'deleted': true,
+                        'updated_at': DateTime.now().toUtc().toIso8601String(),
+                      });
                     }
                   } else {
                     final amount = double.tryParse(text);
@@ -338,11 +383,19 @@ class _BudgetSettingsScreenState extends ConsumerState<BudgetSettingsScreen> {
 
                     if (existing != null) {
                       await budgetDao.updateBudgetAmount(existing.id, amount);
+                      _syncBudget(existing.id, 'update', {
+                        'id': existing.id,
+                        'month': monthStr,
+                        'type': 'category_budget',
+                        'category_id': item.categoryId,
+                        'target_amount': amount,
+                      });
                     } else {
                       final userId = ref.read(currentUserIdProvider);
+                      final newId = IdGenerator.generate();
                       await budgetDao.insertBudget(
                         BudgetsCompanion(
-                          id: Value(IdGenerator.generate()),
+                          id: Value(newId),
                           userId: Value(userId),
                           month: Value(monthStr),
                           type: const Value('category_budget'),
@@ -350,6 +403,13 @@ class _BudgetSettingsScreenState extends ConsumerState<BudgetSettingsScreen> {
                           targetAmount: Value(amount),
                         ),
                       );
+                      _syncBudget(newId, 'insert', {
+                        'id': newId,
+                        'month': monthStr,
+                        'type': 'category_budget',
+                        'category_id': item.categoryId,
+                        'target_amount': amount,
+                      });
                     }
                   }
                   if (ctx.mounted) Navigator.of(ctx).pop();
@@ -369,18 +429,16 @@ class _BudgetSettingsScreenState extends ConsumerState<BudgetSettingsScreen> {
         BudgetParams(year: _year, month: _month)));
   }
 
-  void _showUndoSnackBar(String message, Future<void> Function() onUndo) {
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(message),
-        behavior: SnackBarBehavior.floating,
-        duration: const Duration(seconds: 4),
-        action: SnackBarAction(
-          label: '撤销',
-          onPressed: onUndo,
-        ),
-      ),
+  /// 将预算变更同步到 Supabase
+  void _syncBudget(String budgetId, String operation, Map<String, dynamic> payload) {
+    final syncQueue = ref.read(syncQueueServiceProvider);
+    syncQueue.enqueue(
+      operationType: operation,
+      tableName: 'budgets',
+      recordId: budgetId,
+      payload: jsonEncode(payload),
     );
+    syncQueue.processQueue().catchError((_) {});
   }
 
   bool _hasOverBudget(CategoryBudgetData data) {

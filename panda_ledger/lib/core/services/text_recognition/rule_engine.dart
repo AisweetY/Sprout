@@ -314,4 +314,44 @@ class RuleEngine implements IAiParsingService {
 
     return note.isEmpty ? null : note;
   }
+
+  @override
+  Future<List<ParsedTransaction>> parseBatch({
+    required String userInput,
+    required Map<String, String> existingCategories,
+    required Map<String, String> existingAccounts,
+  }) async {
+    // 按换行、中文句号、分号分割
+    final chunks = userInput
+        .split(RegExp(r'[。；\n;]'))
+        .map((s) => s.trim())
+        .where((s) => s.isNotEmpty)
+        .toList();
+
+    final results = <ParsedTransaction>[];
+    for (final chunk in chunks) {
+      // 尝试进一步分割（如"吃饭30，坐车5元"）
+      final subChunks = _splitByCommaOrAmount(chunk);
+      for (final sub in subChunks) {
+        final result = await parse(
+          userInput: sub,
+          existingCategories: existingCategories,
+          existingAccounts: existingAccounts,
+        );
+        if (result.hasPartialResult) {
+          results.add(result);
+        }
+      }
+    }
+    return results;
+  }
+
+  /// 按逗号或金额特征进一步拆分子句
+  static List<String> _splitByCommaOrAmount(String text) {
+    final parts = text.split(RegExp(r'[，,]'));
+    if (parts.length > 1) {
+      return parts.map((s) => s.trim()).where((s) => s.isNotEmpty).toList();
+    }
+    return [text];
+  }
 }

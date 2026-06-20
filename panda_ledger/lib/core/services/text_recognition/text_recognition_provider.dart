@@ -40,7 +40,7 @@ class TextRecognitionService {
     required this.aiService,
   });
 
-  /// 解析用户输入
+  /// 解析用户输入（单笔）
   ///
   /// 策略：本地规则引擎优先 → AI 兜底（仅当置信度不足时）
   Future<ParsedTransaction> parse({
@@ -90,5 +90,41 @@ class TextRecognitionService {
           : localResult.confidence,
       rawInput: userInput,
     );
+  }
+
+  /// 批量解析（一口气记账）
+  ///
+  /// 策略：规则引擎优先 → AI 批量解析兜底
+  Future<List<ParsedTransaction>> parseBatch({
+    required String userInput,
+    required Map<String, String> existingCategories,
+    required Map<String, String> existingAccounts,
+  }) async {
+    // 第一层：规则引擎批量解析
+    final ruleResults = await ruleEngine.parseBatch(
+      userInput: userInput,
+      existingCategories: existingCategories,
+      existingAccounts: existingAccounts,
+    );
+
+    // 规则引擎产出 ≥2 条且所有置信度 ≥0.6 且有金额 → 直接返回
+    if (ruleResults.length >= 2 &&
+        ruleResults.every((r) => r.confidence >= 0.6 && r.amount != null)) {
+      return ruleResults;
+    }
+
+    // 第二层：AI 批量解析兜底
+    try {
+      final aiResults = await aiService.parseBatch(
+        userInput: userInput,
+        existingCategories: existingCategories,
+        existingAccounts: existingAccounts,
+      );
+      if (aiResults.isNotEmpty) return aiResults;
+    } catch (_) {
+      // AI 失败，回退到规则引擎结果
+    }
+
+    return ruleResults;
   }
 }

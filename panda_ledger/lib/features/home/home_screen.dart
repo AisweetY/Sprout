@@ -1,10 +1,14 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../../core/theme/colors.dart';
 import '../../core/utils/accessibility_utils.dart';
+import '../../core/widgets/record_card.dart';
 import '../../core/widgets/shimmer_loading.dart';
+import '../../data/local/app_database_provider.dart';
+import '../../data/repository/record_repository.dart';
+import '../record/record_screen.dart';
 import '../settings/budget_settings_screen.dart';
+import 'history_screen.dart';
 import 'home_provider.dart';
 
 /// 首页 — 核心问题：「我现在的财务状态是什么」
@@ -32,6 +36,7 @@ class HomeScreen extends ConsumerWidget {
   Widget _buildContent(BuildContext context, WidgetRef ref, HomeData data, ThemeData theme) {
     return RefreshIndicator(
       onRefresh: () async {
+        // Provider 自动响应数据变更，此处 invalidate 仅为支持下拉刷新手势动画
         ref.invalidate(homeDataProvider);
         await ref.read(homeDataProvider.future);
       },
@@ -51,8 +56,8 @@ class HomeScreen extends ConsumerWidget {
           _NetWorthRow(data: data, theme: theme),
           const SizedBox(height: 24),
 
-          // ── 钱去哪了 Top5 ──
-          _TopSpendingSection(data: data, theme: theme),
+          // ── 当月按天流水 ──
+          _DailyRecordsSection(data: data, theme: theme),
         ],
       ),
     );
@@ -285,84 +290,187 @@ class _StatItem extends StatelessWidget {
   }
 }
 
-class _TopSpendingSection extends StatelessWidget {
+/// 当月按天分组的流水列表
+class _DailyRecordsSection extends ConsumerWidget {
   final HomeData data;
   final ThemeData theme;
-  const _TopSpendingSection({required this.data, required this.theme});
+  const _DailyRecordsSection({required this.data, required this.theme});
+
+  void _editRecord(BuildContext context, WidgetRef ref, RecordItem item) async {
+    final recordDao = ref.read(recordDaoProvider);
+    final record = await recordDao.getById(item.id);
+    if (record == null || !context.mounted) return;
+    await Navigator.of(context).push(
+      MaterialPageRoute(builder: (_) => RecordScreen(editRecord: record)),
+    );
+    // Provider 自动响应数据变更，无需手动刷新
+  }
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text('钱去哪了', style: theme.textTheme.titleMedium),
+        // 标题行："本月流水" + "查看全部"
+        Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            Text('本月流水', style: theme.textTheme.titleMedium),
+            InkWell(
+              onTap: () {
+                Navigator.of(context).push(
+                  MaterialPageRoute(builder: (_) => const HistoryScreen()),
+                );
+              },
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text('查看全部', style: theme.textTheme.bodySmall?.copyWith(
+                    color: theme.colorScheme.primary,
+                  )),
+                  Icon(Icons.chevron_right, size: 18, color: theme.colorScheme.primary),
+                ],
+              ),
+            ),
+          ],
+        ),
         const SizedBox(height: 12),
-        if (data.topSpending.isEmpty)
+        if (data.dailyGroups.isEmpty)
           Container(
             padding: const EdgeInsets.symmetric(vertical: 32),
             alignment: Alignment.center,
             child: Text('记一笔，看看钱都花在哪', style: theme.textTheme.bodyMedium),
           )
         else
-          ...data.topSpending.asMap().entries.map((entry) {
-            final idx = entry.key;
-            final item = entry.value;
-            final maxAmount = data.topSpending.first.amount;
-            final ratio = maxAmount > 0 ? item.amount / maxAmount : 0.0;
-            return Padding(
-              padding: const EdgeInsets.only(bottom: 8),
-              child: Row(
-                children: [
-                  // 排名序号
-                  SizedBox(
-                    width: 24,
-                    child: Text('${idx + 1}', style: TextStyle(
-                      fontSize: 14,
-                      fontWeight: idx < 3 ? FontWeight.w600 : FontWeight.w400,
-                      color: idx < 3 ? theme.colorScheme.primary : theme.colorScheme.outline,
-                    )),
-                  ),
-                  // 分类名
-                  SizedBox(width: 56, child: Text(item.name, style: theme.textTheme.bodyMedium)),
-                  const SizedBox(width: 8),
-                  // 条形图
-                  Expanded(
-                    child: ClipRRect(
-                      borderRadius: BorderRadius.circular(4),
-                      child: TweenAnimationBuilder<double>(
-                        tween: Tween(begin: 0, end: ratio),
-                        duration: AccessibilityUtils.motionDuration(context, const Duration(milliseconds: 500)),
-                        curve: Curves.easeOut,
-                        builder: (context, value, _) {
-                          return LinearProgressIndicator(
-                            value: value,
-                            minHeight: 12,
-                            backgroundColor: theme.colorScheme.surfaceContainerHighest,
-                            color: _categoryColor(idx),
-                          );
-                        },
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  // 金额
-                  SizedBox(
-                    width: 72,
-                    child: Text(
-                      '¥ ${item.amount.toStringAsFixed(0)}',
-                      textAlign: TextAlign.right,
-                      style: theme.textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w500),
-                    ),
-                  ),
-                ],
-              ),
-            );
-          }),
+          ...data.dailyGroups.map((group) => _DayGroup(
+                group: group,
+                theme: theme,
+                onTapItem: (item) => _editRecord(context, ref, item),
+                onDeleteItem: (item) => _deleteRecordItem(context, ref, item),
+              )),
       ],
     );
   }
 
-  Color _categoryColor(int index) {
-    return AppColors.categoryColors[index % AppColors.categoryColors.length];
+  Future<void> _deleteRecordItem(BuildContext context, WidgetRef ref, RecordItem item) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('删除记录'),
+        content: Text('确定要删除这笔 ¥${item.amount.toStringAsFixed(2)} 的记录吗？'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('取消')),
+          FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: Theme.of(ctx).colorScheme.error),
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('删除'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+
+    final recordDao = ref.read(recordDaoProvider);
+    final record = await recordDao.getById(item.id);
+    if (record == null) return;
+
+    await ref.read(recordRepositoryProvider).deleteRecord(record);
+    // Provider 自动响应数据变更，无需手动刷新
+  }
+
+}
+
+/// 单日分组
+class _DayGroup extends StatelessWidget {
+  final DailyRecordGroup group;
+  final ThemeData theme;
+  final void Function(RecordItem item) onTapItem;
+  final void Function(RecordItem item) onDeleteItem;
+
+  const _DayGroup({
+    required this.group,
+    required this.theme,
+    required this.onTapItem,
+    required this.onDeleteItem,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final weekdayNames = ['一', '二', '三', '四', '五', '六', '日'];
+    final weekday = weekdayNames[group.date.weekday - 1];
+
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: Card(
+        margin: EdgeInsets.zero,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 14),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              // 日期标题行
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Row(
+                    children: [
+                      Text(
+                        group.dateLabel,
+                        style: theme.textTheme.titleSmall?.copyWith(
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Text(
+                        '周$weekday',
+                        style: theme.textTheme.bodySmall?.copyWith(
+                          color: theme.colorScheme.outline,
+                        ),
+                      ),
+                    ],
+                  ),
+                  Row(
+                    children: [
+                      if (group.dayIncome > 0)
+                        Text(
+                          '收 ¥${group.dayIncome.toStringAsFixed(0)} ',
+                          style: TextStyle(
+                            fontSize: 13,
+                            color: theme.colorScheme.primary,
+                          ),
+                        ),
+                      if (group.dayExpense > 0)
+                        Text(
+                          '支 ¥${group.dayExpense.toStringAsFixed(0)}',
+                          style: TextStyle(
+                            fontSize: 13,
+                            color: theme.colorScheme.error,
+                          ),
+                        ),
+                    ],
+                  ),
+                ],
+              ),
+              const SizedBox(height: 4),
+              const Divider(height: 1),
+              const SizedBox(height: 4),
+              // 当天每一笔 — 使用统一 RecordCard
+              ...group.items.map((item) => RecordCard(
+                    id: item.id,
+                    type: item.type,
+                    amount: item.amount,
+                    categoryName: item.categoryName,
+                    categoryIcon: item.categoryIcon,
+                    accountName: item.accountName,
+                    note: item.note,
+                    syncStatus: item.syncStatus,
+                    onTap: () => onTapItem(item),
+                    onDelete: () => onDeleteItem(item),
+                  )),
+            ],
+          ),
+        ),
+      ),
+    );
   }
 }

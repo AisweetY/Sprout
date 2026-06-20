@@ -15,4 +15,14 @@ class AiServiceStub implements IAiParsingService {
     // 桩实现：不做任何解析，全部交给本地规则引擎处理
     return ParsedTransaction.empty(userInput);
   }
+
+  @override
+  Future<List<ParsedTransaction>> parseBatch({
+    required String userInput,
+    required Map<String, String> existingCategories,
+    required Map<String, String> existingAccounts,
+  }) async {
+    // 桩实现：返回空列表，由上层交由规则引擎处理
+    return [];
+  }
 }

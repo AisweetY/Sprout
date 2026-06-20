@@ -12,6 +12,9 @@ class Categories extends Table {
   )();
   IntColumn get sortOrder => integer().named('sort_order').withDefault(const Constant(0))();
   BoolColumn get isArchived => boolean().named('is_archived').withDefault(const Constant(false))();
+  DateTimeColumn get updatedAt => dateTime().named('updated_at').withDefault(currentDateAndTime)();
+  TextColumn get syncStatus => text().named('sync_status').withDefault(const Constant('synced'))();
+  BoolColumn get deleted => boolean().withDefault(const Constant(false))();
 
   @override
   Set<Column> get primaryKey => {id};

@@ -29,11 +29,23 @@ class AssetsTimeParams {
   int get hashCode => Object.hash(dimension, customStart, customEnd);
 }
 
-/// 资产页数据 Provider — 监听账户变化，自动刷新
+/// 资产页数据 Provider — 响应式自动更新
+///
+/// 依赖 allAccountsStreamProvider / monthlyRecordsStreamProvider，
+/// 当账户或流水变更时自动重算。
 final assetsDataProvider =
     FutureProvider.family<AssetsData, AssetsTimeParams>((ref, params) async {
   final accountRepo = ref.watch(accountRepositoryProvider);
   final db = ref.watch(appDatabaseProvider);
+
+  // ═══ 订阅底层数据流 → 数据变更时自动失效重算 ═══
+  ref.watch(allAccountsStreamProvider);
+  // 订阅最近 12 个月的流水（覆盖所有维度需要的历史数据）
+  final now = DateTime.now();
+  for (int i = 0; i < 12; i++) {
+    final d = DateTime(now.year, now.month - i, 1);
+    ref.watch(monthlyRecordsStreamProvider((year: d.year, month: d.month)));
+  }
 
   final accounts = await accountRepo.getAllAccounts();
   final active = accounts.where((a) => !a.isArchived).toList();
@@ -120,14 +132,14 @@ Future<List<SnapshotPoint>> _computeDailySnapshots(
 
   final query = db.customSelect(
     '''SELECT
-         DATE(r.occurred_at) as dt,
+         DATE(r.occurred_at / 1000, 'unixepoch') as dt,
          COALESCE(SUM(CASE WHEN r.type = 'income' THEN r.amount ELSE 0 END), 0) -
          COALESCE(SUM(CASE WHEN r.type = 'expense' THEN r.amount ELSE 0 END), 0) as net
        FROM records r
        WHERE r.occurred_at >= ?
        GROUP BY dt
        ORDER BY dt DESC''',
-    variables: [Variable.withString(start.toIso8601String())],
+    variables: [Variable.withDateTime(start)],
     readsFrom: {db.records},
   );
 
@@ -176,14 +188,14 @@ Future<List<SnapshotPoint>> _computeWeeklySnapshots(
   // 按日查询
   final query = db.customSelect(
     '''SELECT
-         DATE(r.occurred_at) as dt,
+         DATE(r.occurred_at / 1000, 'unixepoch') as dt,
          COALESCE(SUM(CASE WHEN r.type = 'income' THEN r.amount ELSE 0 END), 0) -
          COALESCE(SUM(CASE WHEN r.type = 'expense' THEN r.amount ELSE 0 END), 0) as net
        FROM records r
        WHERE r.occurred_at >= ?
        GROUP BY dt
        ORDER BY dt DESC''',
-    variables: [Variable.withString(start.toIso8601String())],
+    variables: [Variable.withDateTime(start)],
     readsFrom: {db.records},
   );
 
@@ -234,15 +246,15 @@ Future<List<SnapshotPoint>> _computeMonthlySnapshots(
 
   final query = db.customSelect(
     '''SELECT
-         CAST(strftime('%Y', r.occurred_at) AS INTEGER) as yr,
-         CAST(strftime('%m', r.occurred_at) AS INTEGER) as mo,
+         CAST(strftime('%Y', r.occurred_at / 1000, 'unixepoch') AS INTEGER) as yr,
+         CAST(strftime('%m', r.occurred_at / 1000, 'unixepoch') AS INTEGER) as mo,
          COALESCE(SUM(CASE WHEN r.type = 'income' THEN r.amount ELSE 0 END), 0) -
          COALESCE(SUM(CASE WHEN r.type = 'expense' THEN r.amount ELSE 0 END), 0) as net
        FROM records r
        WHERE r.occurred_at >= ?
        GROUP BY yr, mo
        ORDER BY yr DESC, mo DESC''',
-    variables: [Variable.withString(start.toIso8601String())],
+    variables: [Variable.withDateTime(start)],
     readsFrom: {db.records},
   );
 
@@ -288,7 +300,7 @@ Future<List<SnapshotPoint>> _computeYearlySnapshots(
 ) async {
   final query = db.customSelect(
     '''SELECT
-         CAST(strftime('%Y', r.occurred_at) AS INTEGER) as yr,
+         CAST(strftime('%Y', r.occurred_at / 1000, 'unixepoch') AS INTEGER) as yr,
          COALESCE(SUM(CASE WHEN r.type = 'income' THEN r.amount ELSE 0 END), 0) -
          COALESCE(SUM(CASE WHEN r.type = 'expense' THEN r.amount ELSE 0 END), 0) as net
        FROM records r
@@ -351,15 +363,15 @@ Future<List<SnapshotPoint>> _computeDailyRangeSnapshots(
   AppDatabase db, double currentNetWorth, DateTime start, DateTime end,
 ) async {
   final query = db.customSelect(
-    '''SELECT DATE(r.occurred_at) as dt,
+    '''SELECT DATE(r.occurred_at / 1000, 'unixepoch') as dt,
          COALESCE(SUM(CASE WHEN r.type='income' THEN r.amount ELSE 0 END),0) -
          COALESCE(SUM(CASE WHEN r.type='expense' THEN r.amount ELSE 0 END),0) as net
        FROM records r
        WHERE r.occurred_at >= ? AND r.occurred_at < ?
        GROUP BY dt ORDER BY dt ASC''',
     variables: [
-      Variable.withString(start.toIso8601String()),
-      Variable.withString(end.toIso8601String()),
+      Variable.withDateTime(start),
+      Variable.withDateTime(end),
     ],
     readsFrom: {db.records},
   );
@@ -402,16 +414,16 @@ Future<List<SnapshotPoint>> _computeMonthRangeSnapshots(
   AppDatabase db, double currentNetWorth, DateTime start, DateTime end,
 ) async {
   final query = db.customSelect(
-    '''SELECT CAST(strftime('%Y', r.occurred_at) AS INTEGER) as yr,
-         CAST(strftime('%m', r.occurred_at) AS INTEGER) as mo,
+    '''SELECT CAST(strftime('%Y', r.occurred_at / 1000, 'unixepoch') AS INTEGER) as yr,
+         CAST(strftime('%m', r.occurred_at / 1000, 'unixepoch') AS INTEGER) as mo,
          COALESCE(SUM(CASE WHEN r.type='income' THEN r.amount ELSE 0 END),0) -
          COALESCE(SUM(CASE WHEN r.type='expense' THEN r.amount ELSE 0 END),0) as net
        FROM records r
        WHERE r.occurred_at >= ? AND r.occurred_at < ?
        GROUP BY yr, mo ORDER BY yr ASC, mo ASC''',
     variables: [
-      Variable.withString(start.toIso8601String()),
-      Variable.withString(end.toIso8601String()),
+      Variable.withDateTime(start),
+      Variable.withDateTime(end),
     ],
     readsFrom: {db.records},
   );

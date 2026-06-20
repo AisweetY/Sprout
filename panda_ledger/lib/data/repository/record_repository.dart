@@ -210,4 +210,173 @@ class RecordRepository {
   Future<List<Record>> getRecentRecords({int limit = 50}) {
     return dao.getRecords(limit: limit);
   }
+
+  /// 按 ID 获取单条记录
+  Future<Record?> getById(String id) => dao.getById(id);
+
+  /// 搜索/筛选流水（分页）
+  Future<({List<Record> records, bool hasMore})> searchRecords({
+    DateTime? start,
+    DateTime? end,
+    String? categoryId,
+    String? accountId,
+    String? keyword,
+    int limit = 30,
+    int offset = 0,
+  }) {
+    return dao.searchRecords(
+      start: start,
+      end: end,
+      categoryId: categoryId,
+      accountId: accountId,
+      keyword: keyword,
+      limit: limit,
+      offset: offset,
+    );
+  }
+
+  /// 更新记录并修正关联账户余额
+  ///
+  /// [oldAccountId] / [oldToAccountId] 是编辑前记录的原始账户 ID，
+  /// 用于正确撤销旧记账对余额的影响。若不传则默认与当前账户相同
+  /// （适用于未变更账户的编辑场景）。
+  Future<void> updateRecord({
+    required String recordId,
+    required String accountId,
+    required double amount,
+    required String type,
+    String? toAccountId,
+    String? categoryId,
+    String? note,
+    DateTime? occurredAt,
+    double? oldAmount,
+    String? oldType,
+    String? oldAccountId,
+    String? oldToAccountId,
+  }) async {
+    // 1. 先撤销旧记账对余额的影响
+    if (oldAmount != null && oldType != null) {
+      await _reverseAccountBalance(
+        accountId: oldAccountId ?? accountId,
+        amount: oldAmount,
+        type: oldType,
+        toAccountId: oldToAccountId ?? toAccountId,
+      );
+    }
+
+    // 2. 更新记录本身
+    await dao.updateRecord(
+      recordId,
+      RecordsCompanion(
+        categoryId: Value.absentIfNull(categoryId),
+        amount: Value(amount),
+        type: Value(type),
+        note: Value.absentIfNull(note),
+        occurredAt: Value.absentIfNull(occurredAt),
+        updatedAt: Value(DateTime.now()),
+        syncStatus: const Value('pending'),
+      ),
+    );
+
+    // 3. 应用新记账对余额的影响
+    await _updateAccountBalance(
+      accountId: accountId,
+      amount: amount,
+      type: type,
+      toAccountId: toAccountId,
+    );
+
+    // 4. 入同步队列
+    try {
+      await syncQueue.enqueue(
+        operationType: 'update',
+        tableName: 'records',
+        recordId: recordId,
+        payload: jsonEncode({
+          'id': recordId,
+          'account_id': accountId,
+          'to_account_id': toAccountId,
+          'amount': amount,
+          'type': type,
+          'category_id': categoryId,
+          'note': note,
+          'occurred_at': (occurredAt ?? DateTime.now()).toIso8601String(),
+        }),
+      );
+      syncQueue.processQueue().catchError((_) {});
+    } catch (_) {}
+  }
+
+  /// 删除记录并修正关联账户余额（软删除）
+  Future<void> deleteRecord(Record record) async {
+    // 1. 撤销记账对余额的影响
+    await _reverseAccountBalance(
+      accountId: record.accountId,
+      amount: record.amount,
+      type: record.type,
+      toAccountId: record.toAccountId,
+    );
+
+    // 2. 软删除本地记录
+    await dao.softDeleteRecord(record.id);
+
+    // 3. 入同步队列（upsert 模式，带 deleted=true + account_id 用于余额同步）
+    try {
+      final now = DateTime.now().toUtc();
+      await syncQueue.enqueue(
+        operationType: 'update',
+        tableName: 'records',
+        recordId: record.id,
+        payload: jsonEncode({
+          'id': record.id,
+          'account_id': record.accountId,
+          'to_account_id': record.toAccountId,
+          'amount': record.amount,
+          'type': record.type,
+          'category_id': record.categoryId,
+          'note': record.note,
+          'occurred_at': record.occurredAt.toIso8601String(),
+          'source': record.source,
+          'deleted': true,
+          'updated_at': now.toIso8601String(),
+        }),
+      );
+      syncQueue.processQueue().catchError((_) {});
+    } catch (_) {}
+  }
+
+  /// 撤销某个记账操作对账户余额的影响（与 _updateAccountBalance 相反）
+  Future<void> _reverseAccountBalance({
+    required String accountId,
+    required double amount,
+    required String type,
+    String? toAccountId,
+  }) async {
+    switch (type) {
+      case 'expense':
+        final account = await accountDao.getById(accountId);
+        if (account != null) {
+          await accountDao.updateBalance(accountId, account.balance + amount);
+        }
+        break;
+      case 'income':
+        final account = await accountDao.getById(accountId);
+        if (account != null) {
+          await accountDao.updateBalance(accountId, account.balance - amount);
+        }
+        break;
+      case 'transfer':
+        if (toAccountId != null) {
+          final fromAccount = await accountDao.getById(accountId);
+          if (fromAccount != null) {
+            await accountDao.updateBalance(accountId, fromAccount.balance + amount);
+          }
+          final toAccount = await accountDao.getById(toAccountId);
+          if (toAccount != null) {
+            await accountDao.updateBalance(toAccountId, toAccount.balance - amount);
+          }
+        }
+        break;
+    }
+  }
 }

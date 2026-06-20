@@ -57,7 +57,10 @@ class CategoryBudgetData {
   });
 }
 
-/// 预算设置页面的数据 Provider
+/// 预算设置页面的数据 Provider — 响应式自动更新
+///
+/// 依赖 categoriesStreamProvider / monthlyRecordsStreamProvider /
+/// monthlyBudgetsStreamProvider，当分类/流水/预算变更时自动重算。
 final categoryBudgetDataProvider =
     FutureProvider.family<CategoryBudgetData, BudgetParams>((ref, params) async {
   final db = ref.watch(appDatabaseProvider);
@@ -66,6 +69,11 @@ final categoryBudgetDataProvider =
 
   final monthStr =
       '${params.year}-${params.month.toString().padLeft(2, '0')}';
+
+  // ═══ 订阅底层数据流 → 数据变更时自动失效重算 ═══
+  ref.watch(categoriesStreamProvider);
+  ref.watch(monthlyRecordsStreamProvider((year: params.year, month: params.month)));
+  ref.watch(monthlyBudgetsStreamProvider(monthStr));
 
   // 并行获取：储蓄目标 + 支出分类 + 月度预算
   final results = await Future.wait([
@@ -110,8 +118,8 @@ final categoryBudgetDataProvider =
            AND r.occurred_at < ?''',
       variables: [
         Variable.withString(cat.id),
-        Variable.withString(start.toIso8601String()),
-        Variable.withString(end.toIso8601String()),
+        Variable.withDateTime(start),
+        Variable.withDateTime(end),
       ],
       readsFrom: {db.records},
     ).map((row) => row.read<double>('total')).getSingle();

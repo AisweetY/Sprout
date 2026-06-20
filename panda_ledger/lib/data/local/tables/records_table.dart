@@ -17,6 +17,7 @@ class Records extends Table {
   DateTimeColumn get updatedAt => dateTime().named('updated_at').withDefault(currentDateAndTime)();
   TextColumn get syncStatus => text().named('sync_status').withDefault(const Constant('pending'))();
   TextColumn get source => text().withDefault(const Constant('manual'))();
+  BoolColumn get deleted => boolean().withDefault(const Constant(false))();
 
   @override
   Set<Column> get primaryKey => {id};

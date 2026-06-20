@@ -15,6 +15,9 @@ class Accounts extends Table {
   BoolColumn get isArchived => boolean().named('is_archived').withDefault(const Constant(false))();
   IntColumn get sortOrder => integer().named('sort_order').withDefault(const Constant(0))();
   DateTimeColumn get createdAt => dateTime().named('created_at').withDefault(currentDateAndTime)();
+  DateTimeColumn get updatedAt => dateTime().named('updated_at').withDefault(currentDateAndTime)();
+  TextColumn get syncStatus => text().named('sync_status').withDefault(const Constant('synced'))();
+  BoolColumn get deleted => boolean().withDefault(const Constant(false))();
 
   @override
   Set<Column> get primaryKey => {id};

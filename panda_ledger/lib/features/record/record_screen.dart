@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/constants.dart';
+import '../../core/utils/category_icon_utils.dart';
 import '../../core/utils/id_generator.dart';
 import '../../data/local/app_database_provider.dart';
 import '../../data/local/database.dart';
@@ -18,8 +19,25 @@ import '../../core/services/text_recognition/text_recognition_provider.dart';
 /// 完整记账页面（重设计版）
 ///
 /// 结构：AI 输入区 → 金额显示 → 类型 Tab → 分类网格 → 账户卡片 → 备注 → 日期 → 键盘
+///
+/// 支持编辑模式：传入 [editRecord] 参数即进入编辑模式，表单预填已有数据，
+/// 底部按钮文案变为"保存"，提交时走更新逻辑。
 class RecordScreen extends ConsumerStatefulWidget {
-  const RecordScreen({super.key});
+  /// 编辑模式：传入已有记录
+  final Record? editRecord;
+
+  /// 批量记账模式：预填解析结果
+  final ParsedTransaction? batchParsed;
+
+  /// 批量记账保存回调（返回编辑后的 ParsedTransaction）
+  final void Function(ParsedTransaction)? onBatchSaved;
+
+  const RecordScreen({
+    super.key,
+    this.editRecord,
+    this.batchParsed,
+    this.onBatchSaved,
+  });
 
   @override
   ConsumerState<RecordScreen> createState() => _RecordScreenState();
@@ -48,12 +66,51 @@ class _RecordScreenState extends ConsumerState<RecordScreen> {
   List<Category> _parentCategoriesWithChildren = [];
   List<Account> _accounts = [];
 
+  /// 是否为编辑模式
+  bool get _isEditMode => widget.editRecord != null;
+
+  /// 是否为批量记账模式
+  bool get _isBatchMode => widget.batchParsed != null;
 
   @override
   void initState() {
     super.initState();
     _noteController = TextEditingController();
+    _initFromEditRecord();
+    _initFromBatchParsed();
     WidgetsBinding.instance.addPostFrameCallback((_) => _loadData());
+  }
+
+  /// 编辑模式：从已有记录预填表单
+  void _initFromEditRecord() {
+    final r = widget.editRecord;
+    if (r == null) return;
+    _amount = r.amount.toStringAsFixed(0);
+    if (r.amount % 1 != 0) _amount = r.amount.toStringAsFixed(2);
+    _recordType = r.type;
+    _categoryId = r.categoryId;
+    // 若 categoryId 是子分类，需要查父分类
+    _accountId = r.accountId;
+    _toAccountId = r.toAccountId;
+    _note = r.note ?? '';
+    _noteController.text = _note;
+    _occurredAt = r.occurredAt;
+  }
+
+  /// 批量记账模式：从解析结果预填表单
+  void _initFromBatchParsed() {
+    final p = widget.batchParsed;
+    if (p == null) return;
+    if (p.amount != null) {
+      _amount = p.amount!.toStringAsFixed(0);
+      if (p.amount! % 1 != 0) _amount = p.amount!.toStringAsFixed(2);
+    }
+    _recordType = p.type ?? 'expense';
+    _categoryId = p.subcategoryId ?? p.categoryId;
+    _accountId = p.accountId;
+    _note = p.note ?? '';
+    _noteController.text = _note;
+    if (p.occurredAt != null) _occurredAt = p.occurredAt!;
   }
 
   @override
@@ -71,6 +128,14 @@ class _RecordScreenState extends ConsumerState<RecordScreen> {
         setState(() {
           _allCategories = cats;
           _rebuildCategoryGroups();
+          // 编辑/batch 模式：反查子分类的父级
+          if ((_isEditMode || _isBatchMode) && _categoryId != null) {
+            final cat = cats.where((c) => c.id == _categoryId).firstOrNull;
+            if (cat != null && cat.parentId != null) {
+              _subcategoryId = _categoryId;
+              _categoryId = cat.parentId;
+            }
+          }
         });
       }
     });
@@ -493,23 +558,79 @@ class _RecordScreenState extends ConsumerState<RecordScreen> {
     setState(() => _isSubmitting = true);
 
     try {
+      // 若未选择分类，默认归入「其他」
+      String? effectiveCategoryId = _subcategoryId ?? _categoryId;
+      if (effectiveCategoryId == null && _recordType != 'transfer') {
+        final categoryDao = ref.read(categoryDaoProvider);
+        final defaultName = _recordType == 'income' ? '其他收入' : '其他';
+        final defaultCat = await categoryDao.getByName(defaultName, _recordType);
+        effectiveCategoryId = defaultCat?.id;
+      }
+
       final userId = ref.read(currentUserIdProvider);
-      await ref.read(recordRepositoryProvider).createRecord(
-            userId: userId,
-            accountId: _accountId!,
-            amount: amount,
-            type: _recordType,
-            toAccountId: _toAccountId,
-            categoryId: _subcategoryId ?? _categoryId,
-            note: _note.isEmpty ? null : _note,
-            occurredAt: _occurredAt,
-          );
+      final repo = ref.read(recordRepositoryProvider);
+
+      if (_isBatchMode) {
+        // 批量记账模式：构造 ParsedTransaction 通过回调返回
+        final originalRawInput = widget.batchParsed?.rawInput ?? '';
+        final updated = ParsedTransaction(
+          amount: amount,
+          type: _recordType,
+          categoryId: effectiveCategoryId,
+          subcategoryId: _subcategoryId,
+          accountId: _accountId,
+          accountHint: _accountId != null
+              ? _accounts.where((a) => a.id == _accountId).firstOrNull?.name
+              : null,
+          note: _note.isEmpty ? null : _note,
+          occurredAt: _occurredAt,
+          confidence: 1.0,
+          matchType: MatchType.existing,
+          rawInput: originalRawInput,
+        );
+        widget.onBatchSaved?.call(updated);
+      } else if (_isEditMode) {
+        // 编辑模式：更新已有记录
+        final oldRecord = widget.editRecord!;
+        await repo.updateRecord(
+          recordId: oldRecord.id,
+          accountId: _accountId!,
+          amount: amount,
+          type: _recordType,
+          toAccountId: _toAccountId,
+          categoryId: effectiveCategoryId,
+          note: _note.isEmpty ? null : _note,
+          occurredAt: _occurredAt,
+          oldAmount: oldRecord.amount,
+          oldType: oldRecord.type,
+          oldAccountId: oldRecord.accountId,
+          oldToAccountId: oldRecord.toAccountId,
+        );
+      } else {
+        // 创建模式
+        await repo.createRecord(
+          userId: userId,
+          accountId: _accountId!,
+          amount: amount,
+          type: _recordType,
+          toAccountId: _toAccountId,
+          categoryId: effectiveCategoryId,
+          note: _note.isEmpty ? null : _note,
+          occurredAt: _occurredAt,
+        );
+      }
+
+      if (_isBatchMode) {
+        // 批量记账模式：直接返回，不刷新不弹 toast
+        if (mounted) Navigator.of(context).pop();
+        return;
+      }
 
       HapticFeedback.lightImpact();
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text('已记录 ¥$_amount'),
+            content: Text(_isEditMode ? '已保存修改' : '已记录 ¥$_amount'),
             behavior: SnackBarBehavior.floating,
             duration: const Duration(seconds: 1),
           ),
@@ -521,21 +642,25 @@ class _RecordScreenState extends ConsumerState<RecordScreen> {
       ref.invalidate(insightsDataProvider);
       ref.invalidate(assetsDataProvider);
 
-      // 重置表单
-      setState(() {
-        _amount = '';
-        _isSubmitting = false;
-        _note = '';
-        _noteController.clear();
-        _categoryId = null;
-        _subcategoryId = null;
-      });
+      // 重置表单（新建模式）
+      if (!_isEditMode) {
+        setState(() {
+          _amount = '';
+          _note = '';
+          _noteController.clear();
+          _categoryId = null;
+          _subcategoryId = null;
+        });
+      }
+      setState(() => _isSubmitting = false);
     } catch (e) {
       if (mounted) {
         setState(() => _isSubmitting = false);
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('记录失败: $e'), behavior: SnackBarBehavior.floating),
-        );
+        if (!_isBatchMode) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('记录失败: $e'), behavior: SnackBarBehavior.floating),
+          );
+        }
       }
     }
   }
@@ -573,14 +698,16 @@ class _RecordScreenState extends ConsumerState<RecordScreen> {
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('记一笔'),
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.auto_awesome),
-            tooltip: 'AI 智能记账',
-            onPressed: _showAiDialog,
-          ),
-        ],
+        title: Text(_isBatchMode || _isEditMode ? '编辑账单' : '记一笔'),
+        actions: _isBatchMode
+            ? null
+            : [
+                IconButton(
+                  icon: const Icon(Icons.auto_awesome),
+                  tooltip: 'AI 智能记账',
+                  onPressed: _showAiDialog,
+                ),
+              ],
       ),
       body: SafeArea(
         child: Column(
@@ -667,7 +794,11 @@ class _RecordScreenState extends ConsumerState<RecordScreen> {
             ),
 
             // ── 数字键盘 ──
-            _Numpad(onKeyTap: _onKeyTap, isSubmitting: _isSubmitting),
+            _Numpad(
+              onKeyTap: _onKeyTap,
+              isSubmitting: _isSubmitting,
+              isEditMode: _isEditMode || _isBatchMode,
+            ),
           ],
         ),
       ),
@@ -890,7 +1021,7 @@ class _CategoryPickerSheet extends StatelessWidget {
                       final children = childrenByParent[parent.id] ?? [];
                       return _CategoryGroup(
                         parentName: parent.name,
-                        parentIcon: _iconForCategory(parent.name),
+                        parentIcon: _iconForCategory(parent.name, dbIcon: parent.icon),
                         children: children,
                         selectedSubId: selectedSubId,
                         onSelectChild: onSelectChild,
@@ -951,7 +1082,7 @@ class _CategoryGroup extends StatelessWidget {
               final isSelected = selectedSubId == child.id;
               return _ChildCategoryChip(
                 name: child.name,
-                icon: _iconForCategory(child.name),
+                icon: _iconForCategory(child.name, dbIcon: child.icon),
                 selected: isSelected,
                 onTap: () => onSelectChild(child.id),
               );
@@ -1154,29 +1285,9 @@ IconData _accountTypeIcon(String type) {
   }
 }
 
-/// 根据分类名称返回默认图标
-IconData _iconForCategory(String name) {
-  final lower = name.toLowerCase();
-  if (lower.contains('餐') || lower.contains('食') || lower.contains('饭')) return Icons.restaurant;
-  if (lower.contains('交通') || lower.contains('行') || lower.contains('车')) return Icons.directions_car;
-  if (lower.contains('购物') || lower.contains('买')) return Icons.shopping_bag;
-  if (lower.contains('娱乐') || lower.contains('玩')) return Icons.movie;
-  if (lower.contains('医') || lower.contains('药') || lower.contains('健康')) return Icons.local_hospital;
-  if (lower.contains('住') || lower.contains('房') || lower.contains('租')) return Icons.home;
-  if (lower.contains('教育') || lower.contains('学') || lower.contains('书')) return Icons.school;
-  if (lower.contains('通讯') || lower.contains('手机') || lower.contains('话费')) return Icons.phone_android;
-  if (lower.contains('衣') || lower.contains('服') || lower.contains('鞋')) return Icons.checkroom;
-  if (lower.contains('工资') || lower.contains('薪')) return Icons.payments;
-  if (lower.contains('理财') || lower.contains('投资') || lower.contains('股票')) return Icons.trending_up;
-  if (lower.contains('红包') || lower.contains('礼金')) return Icons.card_giftcard;
-  if (lower.contains('宠物') || lower.contains('猫') || lower.contains('狗')) return Icons.pets;
-  if (lower.contains('运动') || lower.contains('健身')) return Icons.fitness_center;
-  if (lower.contains('美') || lower.contains('发') || lower.contains('容')) return Icons.face;
-  if (lower.contains('零食') || lower.contains('水') || lower.contains('饮')) return Icons.local_cafe;
-  if (lower.contains('日用') || lower.contains('生活')) return Icons.format_paint;
-  if (lower.contains('水电') || lower.contains('燃') || lower.contains('物业')) return Icons.bolt;
-  if (lower.contains('保险')) return Icons.shield;
-  return Icons.category;
+/// 根据分类名称 + DB icon 字段返回图标
+IconData _iconForCategory(String name, {String? dbIcon}) {
+  return getCategoryIcon(dbIcon: dbIcon, categoryName: name);
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -1277,7 +1388,8 @@ class _TransferAccountSelector extends StatelessWidget {
 class _Numpad extends StatelessWidget {
   final void Function(String) onKeyTap;
   final bool isSubmitting;
-  const _Numpad({required this.onKeyTap, required this.isSubmitting});
+  final bool isEditMode;
+  const _Numpad({required this.onKeyTap, required this.isSubmitting, this.isEditMode = false});
 
   @override
   Widget build(BuildContext context) {
@@ -1316,7 +1428,8 @@ class _Numpad extends StatelessWidget {
                   ),
                   child: isSubmitting
                       ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2))
-                      : const Text('完成', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w500)),
+                      : Text(isEditMode ? '保存' : '完成',
+                          style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w500)),
                 ),
               ),
             ),

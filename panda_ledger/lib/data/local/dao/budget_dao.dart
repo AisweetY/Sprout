@@ -11,13 +11,13 @@ class BudgetDao extends DatabaseAccessor<AppDatabase> with _$BudgetDaoMixin {
 
   /// 获取某月所有预算
   Future<List<Budget>> getMonthlyBudgets(String month) {
-    return (select(db.budgets)..where((t) => t.month.equals(month))).get();
+    return (select(db.budgets)..where((t) => t.month.equals(month) & t.deleted.equals(false))).get();
   }
 
   /// 获取某月的储蓄目标
   Future<Budget?> getMonthlySavingGoal(String month) {
     return (select(db.budgets)
-          ..where((t) => t.month.equals(month) & t.type.equals('saving_goal')))
+          ..where((t) => t.month.equals(month) & t.type.equals('saving_goal') & t.deleted.equals(false)))
         .getSingleOrNull();
   }
 
@@ -27,7 +27,8 @@ class BudgetDao extends DatabaseAccessor<AppDatabase> with _$BudgetDaoMixin {
           ..where((t) =>
               t.month.equals(month) &
               t.type.equals('category_budget') &
-              t.categoryId.equals(categoryId)))
+              t.categoryId.equals(categoryId) &
+              t.deleted.equals(false)))
         .getSingleOrNull();
   }
 
@@ -43,13 +44,19 @@ class BudgetDao extends DatabaseAccessor<AppDatabase> with _$BudgetDaoMixin {
     );
   }
 
-  /// 删除预算
-  Future<void> deleteBudget(String id) {
-    return (delete(db.budgets)..where((t) => t.id.equals(id))).go();
+  /// 删除预算（软删除）
+  Future<void> softDeleteBudget(String id) {
+    return (update(db.budgets)..where((t) => t.id.equals(id))).write(
+      BudgetsCompanion(
+        deleted: const Value(true),
+        updatedAt: Value(DateTime.now()),
+        syncStatus: const Value('pending'),
+      ),
+    );
   }
 
   /// 监听月度预算
   Selectable<Budget> watchMonthlyBudgets(String month) {
-    return (select(db.budgets)..where((t) => t.month.equals(month)));
+    return (select(db.budgets)..where((t) => t.month.equals(month) & t.deleted.equals(false)));
   }
 }

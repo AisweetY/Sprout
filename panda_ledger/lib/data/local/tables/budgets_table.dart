@@ -10,6 +10,9 @@ class Budgets extends Table {
   )();
   TextColumn get categoryId => text().named('category_id').nullable()();
   RealColumn get targetAmount => real().named('target_amount')();
+  DateTimeColumn get updatedAt => dateTime().named('updated_at').withDefault(currentDateAndTime)();
+  TextColumn get syncStatus => text().named('sync_status').withDefault(const Constant('synced'))();
+  BoolColumn get deleted => boolean().withDefault(const Constant(false))();
 
   @override
   Set<Column> get primaryKey => {id};

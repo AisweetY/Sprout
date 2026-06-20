@@ -12,6 +12,7 @@ class RecordDao extends DatabaseAccessor<AppDatabase> with _$RecordDaoMixin {
   /// 获取最近流水（分页）
   Future<List<Record>> getRecords({int limit = 50, int offset = 0}) {
     return (select(db.records)
+          ..where((t) => t.deleted.equals(false))
           ..orderBy([(t) => OrderingTerm.desc(t.occurredAt)])
           ..limit(limit, offset: offset))
         .get();
@@ -20,7 +21,7 @@ class RecordDao extends DatabaseAccessor<AppDatabase> with _$RecordDaoMixin {
   /// 按账户获取流水
   Future<List<Record>> getRecordsByAccount(String accountId, {int limit = 50}) {
     return (select(db.records)
-          ..where((t) => t.accountId.equals(accountId))
+          ..where((t) => t.accountId.equals(accountId) & t.deleted.equals(false))
           ..orderBy([(t) => OrderingTerm.desc(t.occurredAt)])
           ..limit(limit))
         .get();
@@ -31,11 +32,11 @@ class RecordDao extends DatabaseAccessor<AppDatabase> with _$RecordDaoMixin {
     final query = db.customSelect(
       'SELECT type, COALESCE(SUM(amount), 0) as total '
       'FROM records '
-      "WHERE occurred_at >= ? AND occurred_at < ? AND type IN ('expense', 'income') "
+      "WHERE occurred_at >= ? AND occurred_at < ? AND type IN ('expense', 'income') AND deleted = 0 "
       'GROUP BY type',
       variables: [
-        Variable.withString(start.toIso8601String()),
-        Variable.withString(end.toIso8601String()),
+        Variable.withDateTime(start),
+        Variable.withDateTime(end),
       ],
       readsFrom: {db.records},
     );
@@ -57,7 +58,7 @@ class RecordDao extends DatabaseAccessor<AppDatabase> with _$RecordDaoMixin {
   /// 获取指定日期范围的流水列表
   Future<List<Record>> getRecordsInRange(DateTime start, DateTime end) {
     return (select(db.records)
-          ..where((t) => t.occurredAt.isBetweenValues(start, end))
+          ..where((t) => t.occurredAt.isBetweenValues(start, end) & t.deleted.equals(false))
           ..orderBy([(t) => OrderingTerm.desc(t.occurredAt)]))
         .get();
   }
@@ -75,12 +76,12 @@ class RecordDao extends DatabaseAccessor<AppDatabase> with _$RecordDaoMixin {
     final end = DateTime(year, month + 1, 1);
 
     final query = db.customSelect(
-      'SELECT COALESCE(SUM(amount), 0) as total FROM records WHERE category_id = ? AND type = ? AND occurred_at >= ? AND occurred_at < ?',
+      'SELECT COALESCE(SUM(amount), 0) as total FROM records WHERE category_id = ? AND type = ? AND occurred_at >= ? AND occurred_at < ? AND deleted = 0',
       variables: [
         Variable.withString(categoryId),
         Variable.withString('expense'),
-        Variable.withString(start.toIso8601String()),
-        Variable.withString(end.toIso8601String()),
+        Variable.withDateTime(start),
+        Variable.withDateTime(end),
       ],
       readsFrom: {db.records},
     );
@@ -116,7 +117,86 @@ class RecordDao extends DatabaseAccessor<AppDatabase> with _$RecordDaoMixin {
     final start = DateTime(year, month, 1);
     final end = DateTime(year, month + 1, 1);
     return (select(db.records)
-      ..where((t) => t.occurredAt.isBetweenValues(start, end))
+      ..where((t) => t.occurredAt.isBetweenValues(start, end) & t.deleted.equals(false))
       ..orderBy([(t) => OrderingTerm.desc(t.occurredAt)]));
+  }
+
+  /// 按 ID 获取单条记录
+  Future<Record?> getById(String id) {
+    return (select(db.records)..where((t) => t.id.equals(id) & t.deleted.equals(false))).getSingleOrNull();
+  }
+
+  /// 更新记录
+  Future<bool> updateRecord(String id, RecordsCompanion data) {
+    return (update(db.records)..where((t) => t.id.equals(id)))
+        .write(data)
+        .then((v) => v > 0);
+  }
+
+  /// 删除记录（软删除）
+  Future<void> softDeleteRecord(String id) {
+    return (update(db.records)..where((t) => t.id.equals(id))).write(
+      RecordsCompanion(
+        deleted: const Value(true),
+        updatedAt: Value(DateTime.now()),
+        syncStatus: const Value('pending'),
+      ),
+    );
+  }
+
+  /// 按 ID 获取单条记录（含已删除，供同步使用）
+  Future<Record?> getByIdAny(String id) {
+    return (select(db.records)..where((t) => t.id.equals(id))).getSingleOrNull();
+  }
+
+  /// 搜索 + 筛选流水（分页）
+  ///
+  /// 返回 (records, hasMore)
+  Future<({List<Record> records, bool hasMore})> searchRecords({
+    DateTime? start,
+    DateTime? end,
+    String? categoryId,
+    String? accountId,
+    String? keyword,
+    int limit = 30,
+    int offset = 0,
+  }) async {
+    // 构建查询：先获取基础结果集，再加条件
+    var query = select(db.records)..where((t) => t.deleted.equals(false));
+
+    // 时间范围
+    if (start != null && end != null) {
+      query = query..where((t) => t.occurredAt.isBetweenValues(start, end));
+    } else if (start != null) {
+      query = query..where((t) => t.occurredAt.isBiggerOrEqualValue(start));
+    } else if (end != null) {
+      query = query..where((t) => t.occurredAt.isSmallerThanValue(end));
+    }
+
+    // 分类筛选
+    if (categoryId != null) {
+      query = query..where((t) => t.categoryId.equals(categoryId));
+    }
+
+    // 账户筛选
+    if (accountId != null) {
+      query = query..where((t) => t.accountId.equals(accountId));
+    }
+
+    // 备注关键字搜索
+    if (keyword != null && keyword.isNotEmpty) {
+      query = query..where((t) => t.note.like('%$keyword%'));
+    }
+
+    // 排序 + 分页（多取一条判断 hasMore）
+    query = query
+      ..orderBy([(t) => OrderingTerm.desc(t.occurredAt)])
+      ..limit(limit + 1, offset: offset);
+
+    final rows = await query.get();
+    final hasMore = rows.length > limit;
+    if (hasMore) rows.removeLast();
+
+    return (records: rows, hasMore: hasMore);
   }
 }

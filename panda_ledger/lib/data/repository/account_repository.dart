@@ -130,11 +130,72 @@ class AccountRepository {
   /// 归档账户
   Future<void> archive(String accountId) async {
     await dao.archiveAccount(accountId);
+    // 同步到 Supabase
+    _syncAccountStatus(accountId, isArchived: true);
   }
 
   /// 取消归档账户
   Future<void> unarchive(String accountId) async {
     await dao.unarchiveAccount(accountId);
+    // 同步到 Supabase
+    _syncAccountStatus(accountId, isArchived: false);
+  }
+
+  /// 更新账户名称和类型
+  Future<void> updateNameAndType(String accountId, String name, String type) async {
+    final account = await dao.getById(accountId);
+    if (account == null) return;
+    await dao.updateAccount(
+      accountId,
+      AccountsCompanion(
+        name: Value(name),
+        type: Value(type),
+        updatedAt: Value(DateTime.now()),
+      ),
+    );
+    // 同步到 Supabase
+    try {
+      await syncQueue.enqueue(
+        operationType: 'update',
+        tableName: 'accounts',
+        recordId: accountId,
+        payload: jsonEncode({
+          'id': accountId,
+          'name': name,
+          'type': type,
+          'balance': account.balance,
+          'currency': 'CNY',
+          'is_liability': account.isLiability,
+          'include_in_net': account.includeInNet,
+          'is_archived': account.isArchived,
+        }),
+      );
+      syncQueue.processQueue().catchError((_) {});
+    } catch (_) {}
+  }
+
+  /// 同步账户归档/取消归档状态到 Supabase
+  Future<void> _syncAccountStatus(String accountId, {required bool isArchived}) async {
+    final account = await dao.getById(accountId);
+    if (account == null) return;
+    try {
+      await syncQueue.enqueue(
+        operationType: 'update',
+        tableName: 'accounts',
+        recordId: accountId,
+        payload: jsonEncode({
+          'id': accountId,
+          'name': account.name,
+          'type': account.type,
+          'balance': account.balance,
+          'currency': 'CNY',
+          'is_liability': account.isLiability,
+          'include_in_net': account.includeInNet,
+          'is_archived': isArchived,
+        }),
+      );
+      syncQueue.processQueue().catchError((_) {});
+    } catch (_) {}
   }
 
   /// 计算净资产

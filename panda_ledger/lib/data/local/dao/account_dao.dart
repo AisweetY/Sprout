@@ -9,36 +9,39 @@ part 'account_dao.g.dart';
 class AccountDao extends DatabaseAccessor<AppDatabase> with _$AccountDaoMixin {
   AccountDao(super.db);
 
-  /// 获取所有未归档账户（按排序字段排列）
+  /// 获取所有未归档账户（按排序字段排列，排除已删除）
   Future<List<Account>> getActiveAccounts() {
     return (select(db.accounts)
-          ..where((t) => t.isArchived.equals(false))
+          ..where((t) => t.isArchived.equals(false) & t.deleted.equals(false))
           ..orderBy([(t) => OrderingTerm.asc(t.sortOrder)]))
         .get();
   }
 
-  /// 获取全部账户（含已归档）
+  /// 获取全部账户（含已归档，排除已删除）
   Future<List<Account>> getAllAccounts() {
-    return (select(db.accounts)..orderBy([(t) => OrderingTerm.asc(t.sortOrder)])).get();
+    return (select(db.accounts)
+          ..where((t) => t.deleted.equals(false))
+          ..orderBy([(t) => OrderingTerm.asc(t.sortOrder)]))
+        .get();
   }
 
   /// 按类型获取账户
   Future<List<Account>> getAccountsByType(String type) {
     return (select(db.accounts)
-          ..where((t) => t.type.equals(type) & t.isArchived.equals(false)))
+          ..where((t) => t.type.equals(type) & t.isArchived.equals(false) & t.deleted.equals(false)))
         .get();
   }
 
   /// 获取计入总资产的账户
   Future<List<Account>> getNetWorthAccounts() {
     return (select(db.accounts)
-          ..where((t) => t.includeInNet.equals(true) & t.isArchived.equals(false)))
+          ..where((t) => t.includeInNet.equals(true) & t.isArchived.equals(false) & t.deleted.equals(false)))
         .get();
   }
 
   /// 获取单个账户
   Future<Account?> getById(String id) {
-    return (select(db.accounts)..where((t) => t.id.equals(id))).getSingleOrNull();
+    return (select(db.accounts)..where((t) => t.id.equals(id) & t.deleted.equals(false))).getSingleOrNull();
   }
 
   /// 插入账户
@@ -72,10 +75,28 @@ class AccountDao extends DatabaseAccessor<AppDatabase> with _$AccountDaoMixin {
     );
   }
 
+  /// 软删除账户
+  Future<void> softDeleteAccount(String id) {
+    return (update(db.accounts)..where((t) => t.id.equals(id))).write(
+      AccountsCompanion(
+        deleted: const Value(true),
+        updatedAt: Value(DateTime.now()),
+        syncStatus: const Value('pending'),
+      ),
+    );
+  }
+
   /// 监听所有活跃账户（用于 Riverpod watch）
   Selectable<Account> watchActiveAccounts() {
     return (select(db.accounts)
-      ..where((t) => t.isArchived.equals(false))
+      ..where((t) => t.isArchived.equals(false) & t.deleted.equals(false))
+      ..orderBy([(t) => OrderingTerm.asc(t.sortOrder)]));
+  }
+
+  /// 监听所有账户（含已归档，用于 Riverpod watch）
+  Selectable<Account> watchAllAccounts() {
+    return (select(db.accounts)
+      ..where((t) => t.deleted.equals(false))
       ..orderBy([(t) => OrderingTerm.asc(t.sortOrder)]));
   }
 }

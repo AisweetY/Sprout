@@ -5,6 +5,21 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../data/local/app_database_provider.dart';
 import '../../data/local/database.dart';
 
+/// 订阅指定时间范围内涉及的所有月份的流水变更
+void _watchRelevantMonths(Ref ref, DateTime start, DateTime end) {
+  // 遍历 start 到 end 之间的所有不重复月份
+  final months = <({int year, int month})>{};
+  var d = DateTime(start.year, start.month, 1);
+  final last = DateTime(end.year, end.month, 1);
+  while (!d.isAfter(last)) {
+    months.add((year: d.year, month: d.month));
+    d = DateTime(d.year, d.month + 1, 1);
+  }
+  for (final m in months) {
+    ref.watch(monthlyRecordsStreamProvider((year: m.year, month: m.month)));
+  }
+}
+
 /// 时间维度枚举
 enum TimeDimension { day, week, month, year, custom }
 
@@ -203,20 +218,29 @@ class RankingItem {
   const RankingItem({required this.name, required this.amount});
 }
 
-/// 分析页数据 Provider
+/// 分析页数据 Provider — 响应式自动更新
+///
+/// 依赖 categoriesStreamProvider / monthlyRecordsStreamProvider，
+/// 当分类或流水变更时自动重算。
 final insightsDataProvider =
     FutureProvider.family<InsightsData, InsightsParams>((ref, params) async {
   try {
     final db = ref.watch(appDatabaseProvider);
     final recordDao = ref.watch(recordDaoProvider);
 
+    // ═══ 订阅底层数据流 → 数据变更时自动失效重算 ═══
+    ref.watch(categoriesStreamProvider);
+    // 订阅当前周期和上一周期涉及月份的流水
+    _watchRelevantMonths(ref, params.start, params.end);
+    final prevParams = params.previousPeriod;
+    _watchRelevantMonths(ref, prevParams.start, prevParams.end);
+
     // 当期汇总（默认值 .0 保证非 null）
     final summary = await recordDao.getSummary(params.start, params.end);
     final income = summary['income'] ?? 0.0;
     final expense = summary['expense'] ?? 0.0;
 
-    // 上期汇总（用于环比）
-    final prevParams = params.previousPeriod;
+    // 上期汇总（用于环比，prevParams 已在上面声明）
     final prevSummary = await recordDao.getSummary(prevParams.start, prevParams.end);
     final prevIncome = prevSummary['income'] ?? 0.0;
     final prevExpense = prevSummary['expense'] ?? 0.0;
@@ -271,8 +295,8 @@ Future<List<RankingItem>> _getCategoryRankings(
        GROUP BY COALESCE(parent.id, c.id), COALESCE(parent.name, c.name)
        ORDER BY total DESC''',
     variables: [
-      Variable.withString(start.toIso8601String()),
-      Variable.withString(end.toIso8601String()),
+      Variable.withDateTime(start),
+      Variable.withDateTime(end),
     ],
     readsFrom: {db.records, db.categories},
   );
