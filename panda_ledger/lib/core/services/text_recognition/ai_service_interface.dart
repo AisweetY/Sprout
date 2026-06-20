@@ -3,9 +3,9 @@ import 'models/parsed_transaction.dart';
 /// AI 文本解析服务抽象接口
 ///
 /// 实现类：
-/// - [RuleEngine] — 本地规则引擎，正则提取金额/时间/场景词
-/// - [AiServiceStub] — 桩实现（当前版本）
-/// - 未来：CloudAiService — 调用 Claude API 等云端 LLM
+/// - [EdgeFunctionAiService] — 通过 Supabase Edge Function 调用 AI 解析
+/// - [AiServiceStub] — 未登录时的桩实现，返回空结果
+/// - [RuleEngine] — 已废弃的本地规则引擎（保留仅作参考）
 abstract class IAiParsingService {
   /// 解析用户输入的自然语言（单笔）
   ///

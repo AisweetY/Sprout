@@ -153,9 +153,10 @@ class SeedService {
   }
 
   Future<String?> _getCategoryId(String userId, String name, String kind) async {
-    final result = await (db.select(db.categories)
-          ..where((t) => t.name.equals(name) & t.kind.equals(kind) & t.parentId.isNull()))
-        .getSingleOrNull();
-    return result?.id;
+    final rows = await (db.select(db.categories)
+          ..where((t) => t.name.equals(name) & t.kind.equals(kind) & t.parentId.isNull())
+          ..limit(1))
+        .get();
+    return rows.isNotEmpty ? rows.first.id : null;
   }
 }

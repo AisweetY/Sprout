@@ -18,11 +18,11 @@ cd panda_ledger && rm -rf .dart_tool/build && dart run build_runner build
 # 静态分析
 cd panda_ledger && flutter analyze
 
-# 运行应用（不含 AI）
+# 运行应用
 cd panda_ledger && flutter run
 
-# 运行应用（含 DeepSeek AI 智能记账 — 需自行获取 API Key）
-cd panda_ledger && flutter run --dart-define=DEEPSEEK_API_KEY=sk-xxx
+# AI 智能记账：通过 Supabase Edge Function 代理调用（无需客户端 Key）
+# 部署 Edge Function 后在 Supabase Secrets 中配置 DEEPSEEK_API_KEY 即可
 
 # 查看依赖版本
 cd panda_ledger && flutter pub outdated
@@ -57,7 +57,7 @@ lib/
 ├── core/                     # 主题、常量、工具、AI 识别服务
 │   ├── theme/                # 语义化颜色（亮+暗双套）、字体层级
 │   ├── services/
-│   │   └── text_recognition/ # AI 文字记账：规则引擎 + AI 接口 + DeepSeek + 桩
+│   │   └── text_recognition/ # AI 文字记账：规则引擎 + Edge Function 代理 + 桩
 │   │       └── models/       # ParsedTransaction 数据模型
 │   ├── utils/                # ID 生成器、日期工具、分类图标解析、SnackBar 统一工具
 │   └── widgets/              # 公共组件：RecordCard（流水卡片）、ShimmerLoading
@@ -68,6 +68,9 @@ lib/
 │   ├── remote/               # Supabase 客户端封装
 │   ├── repository/           # 统一数据访问层（本地优先 + 同步逻辑）
 │   └── sync/                 # 同步队列服务（push/pull/LWW/定时调度）
+├── supabase/
+│   ├── migrations/           # 数据库迁移（001_init → 002_sync_v2 → 003_ai_provider_configs）
+│   └── functions/            # Edge Functions（ai-parse-record — AI 解析代理）
 ├── features/
 │   ├── auth/                 # 邮箱登录/注册/登出 + 认证网关
 │   ├── home/                 # 首页：净存款 + 储蓄目标 + 按天分组流水 + 同步状态
@@ -112,6 +115,16 @@ lib/
 |---|---|
 | `supabase/migrations/001_init.sql` | 初始表结构 + `record_transaction()` RPC + RLS 策略 |
 | `supabase/migrations/002_sync_v2.sql` | 为所有表新增 `deleted`/`updated_at` + updated_at 索引 + 重建 RLS |
+| `supabase/migrations/003_ai_provider_configs.sql` | AI 多平台配置表 + 默认 DeepSeek 配置 |
+
+### Edge Functions
+
+| 函数 | 说明 |
+|---|---|
+| `ai-parse-record` | AI 智能记账解析代理：校验 JWT → 读配置表 → 查用户数据 → 调 AI → 返回结构化 JSON |
+
+**部署**: `supabase functions deploy ai-parse-record`（需安装 Supabase CLI）
+**配置**: 在 Supabase Dashboard → Edge Functions → Secrets 中添加 `DEEPSEEK_API_KEY=sk-xxx`
 
 ## 同步机制
 

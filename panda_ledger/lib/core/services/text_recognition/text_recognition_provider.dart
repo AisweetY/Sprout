@@ -1,130 +1,84 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 
 import 'models/parsed_transaction.dart';
-import 'rule_engine.dart';
 import 'ai_service_interface.dart';
 import 'ai_service_stub.dart';
-import 'deepseek_api_service.dart';
-
-/// 规则引擎 Provider（单例）
-final ruleEngineProvider = Provider<RuleEngine>((ref) => RuleEngine());
+import 'edge_function_ai_service.dart';
 
 /// AI 服务 Provider
 ///
-/// 使用 DeepSeek API。API Key 通过编译时环境变量 `DEEPSEEK_API_KEY` 传入：
-///   flutter run --dart-define=DEEPSEEK_API_KEY=sk-xxx
+/// 通过 Supabase Edge Function `ai-parse-record` 代理调用 AI 平台。
+/// Key 存储在 Supabase Secrets 中，不再暴露于客户端代码。
 ///
-/// 未配置 Key 时自动回退到桩实现（仅规则引擎生效）。
+/// 未登录时回退到桩实现（返回空结果，提示用户登录）。
 final aiServiceProvider = Provider<IAiParsingService>((ref) {
-  const apiKey = String.fromEnvironment('DEEPSEEK_API_KEY');
-  if (apiKey.isEmpty) {
+  final isLoggedIn = Supabase.instance.client.auth.currentSession != null;
+  if (!isLoggedIn) {
     return AiServiceStub();
   }
-  return DeepSeekApiService(apiKey: apiKey);
+  return const EdgeFunctionAiService();
 });
 
-/// 文字识别服务 — 组合规则引擎 + AI 兜底
+/// 文字识别服务 — 直接调用 AI 解析
 final textRecognitionProvider = Provider<TextRecognitionService>((ref) {
   return TextRecognitionService(
-    ruleEngine: ref.watch(ruleEngineProvider),
     aiService: ref.watch(aiServiceProvider),
   );
 });
 
 class TextRecognitionService {
-  final RuleEngine ruleEngine;
   final IAiParsingService aiService;
 
   TextRecognitionService({
-    required this.ruleEngine,
     required this.aiService,
   });
 
   /// 解析用户输入（单笔）
   ///
-  /// 策略：本地规则引擎优先 → AI 兜底（仅当置信度不足时）
+  /// 直接调用 AI 解析，不再使用本地规则引擎兜底。
   Future<ParsedTransaction> parse({
     required String userInput,
     required Map<String, String> existingCategories,
     required Map<String, String> existingAccounts,
   }) async {
-    // 第一层：本地规则引擎
-    final localResult = await ruleEngine.parse(
-      userInput: userInput,
-      existingCategories: existingCategories,
-      existingAccounts: existingAccounts,
-    );
-
-    // 如果本地引擎置信度足够高，直接返回
-    if (localResult.confidence >= 0.6 && localResult.amount != null) {
-      return localResult;
+    if (userInput.trim().isEmpty) {
+      return ParsedTransaction.empty(userInput);
     }
 
-    // 第二层：AI 兜底（当前为桩实现，返回低置信度结果）
-    // 未来：调用真实 AI 服务，将已有分类列表作为上下文传递
-    final aiResult = await aiService.parse(
-      userInput: userInput,
-      existingCategories: existingCategories,
-      existingAccounts: existingAccounts,
-    );
-
-    // 合并结果：优先取 AI 的字段，缺失则用本地引擎的
-    return ParsedTransaction(
-      amount: aiResult.amount ?? localResult.amount,
-      type: aiResult.type ?? localResult.type,
-      categoryId: aiResult.categoryId ?? localResult.categoryId,
-      categoryName: aiResult.categoryName ?? localResult.categoryName,
-      subcategoryId: aiResult.subcategoryId ?? localResult.subcategoryId,
-      subcategoryName: aiResult.subcategoryName ?? localResult.subcategoryName,
-      accountHint: aiResult.accountHint ?? localResult.accountHint,
-      accountId: aiResult.accountId ?? localResult.accountId,
-      note: aiResult.note ?? localResult.note,
-      occurredAt: aiResult.occurredAt ?? localResult.occurredAt,
-      matchType: aiResult.confidence > localResult.confidence
-          ? aiResult.matchType
-          : localResult.matchType,
-      newCategorySuggestion:
-          aiResult.newCategorySuggestion ?? localResult.newCategorySuggestion,
-      confidence: aiResult.confidence > localResult.confidence
-          ? aiResult.confidence
-          : localResult.confidence,
-      rawInput: userInput,
-    );
+    try {
+      final result = await aiService.parse(
+        userInput: userInput,
+        existingCategories: existingCategories,
+        existingAccounts: existingAccounts,
+      );
+      return result;
+    } catch (e) {
+      // AI 调用失败时返回空结果，由 UI 层提示用户手动填写
+      return ParsedTransaction.empty(userInput);
+    }
   }
 
   /// 批量解析（一口气记账）
   ///
-  /// 策略：规则引擎优先 → AI 批量解析兜底
+  /// 直接调用 AI 批量解析，不再使用本地规则引擎兜底。
   Future<List<ParsedTransaction>> parseBatch({
     required String userInput,
     required Map<String, String> existingCategories,
     required Map<String, String> existingAccounts,
   }) async {
-    // 第一层：规则引擎批量解析
-    final ruleResults = await ruleEngine.parseBatch(
-      userInput: userInput,
-      existingCategories: existingCategories,
-      existingAccounts: existingAccounts,
-    );
+    if (userInput.trim().isEmpty) return [];
 
-    // 规则引擎产出 ≥2 条且所有置信度 ≥0.6 且有金额 → 直接返回
-    if (ruleResults.length >= 2 &&
-        ruleResults.every((r) => r.confidence >= 0.6 && r.amount != null)) {
-      return ruleResults;
-    }
-
-    // 第二层：AI 批量解析兜底
     try {
-      final aiResults = await aiService.parseBatch(
+      final results = await aiService.parseBatch(
         userInput: userInput,
         existingCategories: existingCategories,
         existingAccounts: existingAccounts,
       );
-      if (aiResults.isNotEmpty) return aiResults;
-    } catch (_) {
-      // AI 失败，回退到规则引擎结果
+      return results;
+    } catch (e) {
+      // AI 调用失败时返回空列表，由 UI 层提示用户手动填写
+      return [];
     }
-
-    return ruleResults;
   }
 }

@@ -32,6 +32,9 @@ ios/Flutter/Flutter.podspec
 .env
 *.env
 
+# Supabase local state
+**/supabase/.temp/
+
 # Test
 coverage/
 test/.test_coverage.dart

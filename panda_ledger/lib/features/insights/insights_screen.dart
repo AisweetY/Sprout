@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/theme/colors.dart';
 import '../../core/utils/accessibility_utils.dart';
 import '../../core/widgets/shimmer_loading.dart';
+import 'ai_summary_provider.dart';
 import 'insights_provider.dart';
 
 /// 分析页 — 核心问题：「钱具体是怎么花的、为什么」
@@ -521,20 +522,33 @@ Future<void> _pickDate(
 // 内容卡片组件
 // ═══════════════════════════════════════════════════════════════
 
-/// 自动文字结论卡片
-class _ConclusionCard extends StatelessWidget {
+/// AI 财务小结卡片（替代原模板结论）
+///
+/// 4 种状态：
+/// - idle: 显示占位文案 + [✨ 生成小结] 按钮
+/// - loading: 加载动画 + 提示文字（页面不阻塞）
+/// - done: 展示小结正文 + [🔄 重新生成] 按钮
+/// - error: 错误信息 + [🔄 重试] 按钮
+class _ConclusionCard extends ConsumerWidget {
   final InsightsData data;
   final ThemeData theme;
   const _ConclusionCard({required this.data, required this.theme});
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
+    final aiState = ref.watch(aiSummaryProvider);
+    final notifier = ref.read(aiSummaryProvider.notifier);
+
+    // 确保已为当前参数准备状态（幂等，切换维度时自动查缓存或回 idle）
+    notifier.ensurePrepared(data.params);
+
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(20),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
+            // ── 标题行 ──
             Row(
               children: [
                 Icon(Icons.auto_awesome, size: 20, color: theme.colorScheme.primary),
@@ -542,12 +556,163 @@ class _ConclusionCard extends StatelessWidget {
                 Text(data.params.summaryTitle, style: theme.textTheme.titleMedium),
               ],
             ),
-            const SizedBox(height: 12),
-            Text(data.conclusion, style: theme.textTheme.bodyLarge?.copyWith(height: 1.6)),
+            const SizedBox(height: 16),
+
+            // ── 内容区（按状态分支）──
+            switch (aiState.status) {
+              AiSummaryStatus.idle => _buildIdle(context, ref, data),
+              AiSummaryStatus.loading => _buildLoading(context),
+              AiSummaryStatus.done => _buildDone(context, ref, data, aiState.text!),
+              AiSummaryStatus.error => _buildError(context, ref, data, aiState.errorMsg ?? '未知错误'),
+            },
           ],
         ),
       ),
     );
+  }
+
+  /// 无小结状态
+  Widget _buildIdle(BuildContext context, WidgetRef ref, InsightsData data) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          'AI 分析你的收支数据，生成本周期的财务小结，洞察消费趋势和财务健康度。',
+          style: theme.textTheme.bodyLarge?.copyWith(
+            color: theme.colorScheme.onSurfaceVariant,
+            height: 1.6,
+          ),
+        ),
+        const SizedBox(height: 16),
+        Center(
+          child: FilledButton.icon(
+            icon: const Icon(Icons.auto_awesome, size: 18),
+            label: const Text('生成小结'),
+            onPressed: () => _onGenerate(ref, data),
+          ),
+        ),
+      ],
+    );
+  }
+
+  /// 生成中状态
+  Widget _buildLoading(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            SizedBox(
+              width: 18,
+              height: 18,
+              child: CircularProgressIndicator(
+                strokeWidth: 2,
+                color: theme.colorScheme.primary,
+              ),
+            ),
+            const SizedBox(width: 12),
+            Text(
+              'AI 正在分析你的财务数据…',
+              style: theme.textTheme.bodyLarge?.copyWith(
+                color: theme.colorScheme.onSurfaceVariant,
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 8),
+        Text(
+          '生成中可继续浏览页面，完成后自动展示',
+          style: theme.textTheme.bodySmall?.copyWith(
+            color: theme.colorScheme.outline,
+          ),
+        ),
+      ],
+    );
+  }
+
+  /// 已生成状态
+  Widget _buildDone(
+    BuildContext context,
+    WidgetRef ref,
+    InsightsData data,
+    String summary,
+  ) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(summary, style: theme.textTheme.bodyLarge?.copyWith(height: 1.7)),
+        const SizedBox(height: 12),
+        Align(
+          alignment: Alignment.centerRight,
+          child: TextButton.icon(
+            icon: const Icon(Icons.refresh, size: 16),
+            label: const Text('重新生成'),
+            onPressed: () => _onRegenerate(ref, data),
+          ),
+        ),
+      ],
+    );
+  }
+
+  /// 失败状态
+  Widget _buildError(
+    BuildContext context,
+    WidgetRef ref,
+    InsightsData data,
+    String errorMsg,
+  ) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Icon(Icons.error_outline, size: 20, color: theme.colorScheme.error),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                errorMsg,
+                style: theme.textTheme.bodyMedium?.copyWith(
+                  color: theme.colorScheme.error,
+                ),
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 12),
+        Center(
+          child: OutlinedButton.icon(
+            icon: const Icon(Icons.refresh, size: 16),
+            label: const Text('重试'),
+            onPressed: () => _onGenerate(ref, data),
+          ),
+        ),
+      ],
+    );
+  }
+
+  /// 点击「生成小结」→ 准备数据 → 调 Edge Function
+  void _onGenerate(WidgetRef ref, InsightsData data) {
+    _triggerGenerate(ref, data, force: false);
+  }
+
+  /// 点击「重新生成」→ 忽略缓存强制调用
+  void _onRegenerate(WidgetRef ref, InsightsData data) {
+    _triggerGenerate(ref, data, force: true);
+  }
+
+  void _triggerGenerate(WidgetRef ref, InsightsData data, {required bool force}) {
+    final notifier = ref.read(aiSummaryProvider.notifier);
+    final inputFuture = prepareAiSummaryInput(ref, data.params, data);
+
+    inputFuture.then((input) {
+      if (force) {
+        notifier.regenerateSummary(params: data.params, input: input);
+      } else {
+        notifier.generateSummary(params: data.params, input: input);
+      }
+    }).catchError((e) {
+      debugPrint('⚠️ 准备 AI 小结数据失败: $e');
+    });
   }
 }
 

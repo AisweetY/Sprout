@@ -61,10 +61,15 @@ class CategoryDao extends DatabaseAccessor<AppDatabase> with _$CategoryDaoMixin 
   }
 
   /// 按名称查找分类
-  Future<Category?> getByName(String name, String kind) {
-    return (select(db.categories)
-          ..where((t) => t.name.equals(name) & t.kind.equals(kind) & t.deleted.equals(false)))
-        .getSingleOrNull();
+  ///
+  /// 使用 LIMIT 1 + get() 替代 getSingleOrNull()，避免多行数据时抛出
+  /// "Bad state: Too many elements" 错误（可能由同步竞态或重复创建导致）。
+  Future<Category?> getByName(String name, String kind) async {
+    final rows = await (select(db.categories)
+          ..where((t) => t.name.equals(name) & t.kind.equals(kind) & t.deleted.equals(false))
+          ..limit(1))
+        .get();
+    return rows.isNotEmpty ? rows.first : null;
   }
 
   /// 插入分类

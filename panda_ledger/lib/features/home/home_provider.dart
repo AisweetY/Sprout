@@ -67,13 +67,18 @@ final homeDataProvider = FutureProvider<HomeData>((ref) async {
 });
 
 /// 获取月度储蓄目标（不使用 DAO 的便捷方法，因为需要从 budgets 表查）
+///
+/// 使用 LIMIT 1 + get() 替代 getSingleOrNull()，避免多行数据时抛出
+/// "Bad state: Too many elements" 错误（可能由同步竞态或重复创建导致）。
 Future<Budget?> _getMonthlySavingGoal(AppDatabase db, String month) async {
-  return (db.select(db.budgets)
+  final rows = await (db.select(db.budgets)
         ..where((t) =>
             t.month.equals(month) &
             t.type.equals('saving_goal') &
-            t.deleted.equals(false)))
-      .getSingleOrNull();
+            t.deleted.equals(false))
+        ..limit(1))
+      .get();
+  return rows.isNotEmpty ? rows.first : null;
 }
 
 /// 获取当月按天分组的流水（含账户名和分类名）

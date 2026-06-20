@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../data/local/app_database_provider.dart';
 import '../../data/local/database.dart';
+import '../../data/repository/account_repository.dart';
 
 /// 订阅指定时间范围内涉及的所有月份的流水变更
 void _watchRelevantMonths(Ref ref, DateTime start, DateTime end) {
@@ -218,6 +219,106 @@ class RankingItem {
   const RankingItem({required this.name, required this.amount});
 }
 
+/// AI 小结的聚合输入（所有数据由 App 端预计算，不传原始流水给 AI）
+class AiSummaryInput {
+  final String dimensionName;
+  final String periodLabel;
+  final String currentDate;
+  final double income;
+  final double expense;
+  final double netSaving;
+  final double savingsRate;
+  final double prevIncome;
+  final double prevExpense;
+  final List<TopCategoryDetail> topCategories;
+  final List<LargeExpenseItem> largeExpenses;
+  final String? highFrequencyCategory;
+  final AssetRatioData? assets;
+  final double? historicalAvgExpense;
+  final String? budgetStatus;
+
+  const AiSummaryInput({
+    required this.dimensionName,
+    required this.periodLabel,
+    required this.currentDate,
+    required this.income,
+    required this.expense,
+    required this.netSaving,
+    required this.savingsRate,
+    required this.prevIncome,
+    required this.prevExpense,
+    required this.topCategories,
+    required this.largeExpenses,
+    this.highFrequencyCategory,
+    this.assets,
+    this.historicalAvgExpense,
+    this.budgetStatus,
+  });
+
+  Map<String, dynamic> toJson() => {
+        'dimension_name': dimensionName,
+        'period_label': periodLabel,
+        'current_date': currentDate,
+        'income': income,
+        'expense': expense,
+        'net_saving': netSaving,
+        'savings_rate': savingsRate,
+        'prev_income': prevIncome,
+        'prev_expense': prevExpense,
+        'top_categories': topCategories.map((c) => c.toJson()).toList(),
+        'large_expenses': largeExpenses.map((e) => e.toJson()).toList(),
+        'high_frequency_category': highFrequencyCategory,
+        'assets': assets?.toJson(),
+        'historical_avg_expense': historicalAvgExpense,
+        'budget_status': budgetStatus,
+      };
+}
+
+class TopCategoryDetail {
+  final String name;
+  final double amount;
+  final double ratio;
+  final double prevAmount;
+  const TopCategoryDetail({
+    required this.name,
+    required this.amount,
+    required this.ratio,
+    required this.prevAmount,
+  });
+  Map<String, dynamic> toJson() => {
+        'name': name,
+        'amount': amount,
+        'ratio': ratio,
+        'prev_amount': prevAmount,
+      };
+}
+
+class LargeExpenseItem {
+  final String description;
+  final double amount;
+  final String category;
+  const LargeExpenseItem({
+    required this.description,
+    required this.amount,
+    required this.category,
+  });
+  Map<String, dynamic> toJson() => {
+        'description': description,
+        'amount': amount,
+        'category': category,
+      };
+}
+
+class AssetRatioData {
+  final double cashRatio;
+  final double investRatio;
+  const AssetRatioData({required this.cashRatio, required this.investRatio});
+  Map<String, dynamic> toJson() => {
+        'cash_ratio': cashRatio,
+        'invest_ratio': investRatio,
+      };
+}
+
 /// 分析页数据 Provider — 响应式自动更新
 ///
 /// 依赖 categoriesStreamProvider / monthlyRecordsStreamProvider，
@@ -369,4 +470,149 @@ String _generateConclusion(
   }
 
   return buf.toString();
+}
+
+// ═══════════════════════════════════════════════════════════════
+// AI 小结数据聚合（懒调用 — 仅在用户点击「生成」时触发）
+// ═══════════════════════════════════════════════════════════════
+
+/// 准备 AI 小结所需的聚合数据
+///
+/// 所有计算在 App 端完成，不传原始流水给 AI。
+/// 需传入 [ref] 以访问各 DAO/Repo Provider。
+Future<AiSummaryInput> prepareAiSummaryInput(
+  WidgetRef ref,
+  InsightsParams params,
+  InsightsData data,
+) async {
+  final db = ref.read(appDatabaseProvider);
+  final recordDao = ref.read(recordDaoProvider);
+  final accountRepo = ref.read(accountRepositoryProvider);
+  final budgetDao = ref.read(budgetDaoProvider);
+
+  // ── 1. TOP 3 分类（含上期对比）──
+  final prevParams = params.previousPeriod;
+  final prevRankings = await _getCategoryRankings(db, prevParams.start, prevParams.end);
+  final prevMap = <String, double>{};
+  for (final r in prevRankings) {
+    prevMap[r.name] = r.amount;
+  }
+
+  final topCategories = data.rankings.take(3).map((r) {
+    final ratio = data.expense > 0 ? (r.amount / data.expense * 100) : 0.0;
+    return TopCategoryDetail(
+      name: r.name,
+      amount: r.amount,
+      ratio: ratio,
+      prevAmount: prevMap[r.name] ?? 0.0,
+    );
+  }).toList();
+
+  // ── 2. 大额消费 ──
+  final records = await recordDao.getRecordsInRange(params.start, params.end);
+  final largeThreshold = 500.0;
+  final largeExpenses = records
+      .where((r) => r.type == 'expense' && r.amount >= largeThreshold)
+      .map((r) => LargeExpenseItem(
+            description: r.note ?? '消费',
+            amount: r.amount,
+            category: '消费', // 后续可关联 category 名称
+          ))
+      .toList();
+
+  // ── 3. 高频消费分类 ──
+  final expenseRecords = records.where((r) => r.type == 'expense').toList();
+  final categoryCount = <String?, int>{};
+  for (final r in expenseRecords) {
+    categoryCount[r.categoryId] = (categoryCount[r.categoryId] ?? 0) + 1;
+  }
+  String? highFreqCatId;
+  int maxCount = 0;
+  for (final entry in categoryCount.entries) {
+    if (entry.value > maxCount) {
+      maxCount = entry.value;
+      highFreqCatId = entry.key;
+    }
+  }
+
+  // ── 4. 历史月均支出（过去 6 个月）──
+  double? historicalAvgExpense;
+  final now = DateTime.now();
+  final pastMonths = <DateTime>[];
+  for (var i = 1; i <= 6; i++) {
+    var y = now.year;
+    var m = now.month - i;
+    if (m <= 0) {
+      m += 12;
+      y -= 1;
+    }
+    pastMonths.add(DateTime(y, m, 1));
+  }
+
+  double totalHistExpense = 0;
+  int histMonthCount = 0;
+  for (final month in pastMonths) {
+    final endDate = DateTime(month.year, month.month + 1, 1);
+    // 跳过当前周期的月份（避免循环引用）
+    final summary = await recordDao.getSummary(month, endDate);
+    final exp = summary['expense'] ?? 0;
+    if (exp > 0) {
+      totalHistExpense += exp;
+      histMonthCount++;
+    }
+  }
+  if (histMonthCount > 0) {
+    historicalAvgExpense = totalHistExpense / histMonthCount;
+  }
+
+  // ── 5. 资产占比 ──
+  AssetRatioData? assets;
+  final accounts = await accountRepo.getActiveAccounts();
+  if (accounts.isNotEmpty) {
+    double totalBalance = 0;
+    double cashBalance = 0;
+    double investBalance = 0;
+    for (final a in accounts) {
+      final absBalance = a.balance.abs();
+      totalBalance += absBalance;
+      if (a.type == 'cash' || a.type == 'bank' || a.type == 'credit') {
+        cashBalance += absBalance;
+      } else if (a.type == 'invest') {
+        investBalance += absBalance;
+      }
+    }
+    if (totalBalance > 0) {
+      assets = AssetRatioData(
+        cashRatio: (cashBalance / totalBalance * 100).roundToDouble(),
+        investRatio: (investBalance / totalBalance * 100).roundToDouble(),
+      );
+    }
+  }
+
+  // ── 6. 预算状态 ──
+  String? budgetStatus;
+  final monthStr = '${params.start.year}-${params.start.month.toString().padLeft(2, '0')}';
+  final savingGoal = await budgetDao.getMonthlySavingGoal(monthStr);
+  if (savingGoal != null && savingGoal.targetAmount > 0) {
+    final progress = (data.netSaving / savingGoal.targetAmount * 100).clamp(0.0, 100.0);
+    budgetStatus = '月度储蓄目标 ¥${savingGoal.targetAmount.toStringAsFixed(0)}，当前达成 ${progress.toStringAsFixed(0)}%';
+  }
+
+  return AiSummaryInput(
+    dimensionName: params.summaryTitle,  // "本月小结" / "本周小结" / ...
+    periodLabel: params.periodLabel,      // "2026年6月" / "6/16 - 6/22"
+    currentDate: DateTime.now().toIso8601String().substring(0, 10),
+    income: data.income,
+    expense: data.expense,
+    netSaving: data.netSaving,
+    savingsRate: data.savingsRate,
+    prevIncome: data.prevIncome,
+    prevExpense: data.prevExpense,
+    topCategories: topCategories,
+    largeExpenses: largeExpenses,
+    highFrequencyCategory: highFreqCatId, // 后续可按需解析为名称
+    assets: assets,
+    historicalAvgExpense: historicalAvgExpense,
+    budgetStatus: budgetStatus,
+  );
 }
