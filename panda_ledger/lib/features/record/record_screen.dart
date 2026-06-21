@@ -1,5 +1,6 @@
 import 'package:drift/drift.dart' show Value;
 import 'package:flutter/material.dart';
+import 'dart:convert';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/constants.dart';
@@ -9,6 +10,7 @@ import '../../data/local/app_database_provider.dart';
 import '../../data/local/database.dart';
 import '../../data/repository/record_repository.dart';
 import '../../data/repository/account_repository.dart';
+import '../../data/sync/sync_queue_dao_provider.dart';
 import '../auth/auth_provider.dart';
 import '../home/home_provider.dart';
 import '../insights/insights_provider.dart';
@@ -174,6 +176,29 @@ class _RecordScreenState extends ConsumerState<RecordScreen> {
     });
   }
 
+  /// 分类弹窗中新建分类后的回调：刷新分类列表并自动选中新分类
+  void _onCategoryCreated(String newCategoryId) {
+    ref.read(categoryDaoProvider).getCategoriesByKind(_recordType).then((cats) {
+      if (!mounted) return;
+      final found = cats.where((c) => c.id == newCategoryId).firstOrNull;
+      if (found != null) {
+        setState(() {
+          _allCategories = cats;
+          _rebuildCategoryGroups();
+          if (found.parentId != null) {
+            _subcategoryId = newCategoryId;
+            _categoryId = found.parentId;
+          } else {
+            _categoryId = newCategoryId;
+            _subcategoryId = null;
+          }
+        });
+        // 关闭分类选择弹窗
+        Navigator.of(context).pop();
+      }
+    });
+  }
+
   /// 异步刷新分类（用于 AI 解析流程中的 await）
   Future<void> _refreshCategoriesAsync() async {
     final cats = await ref.read(categoryDaoProvider).getCategoriesByKind(_recordType);
@@ -234,6 +259,7 @@ class _RecordScreenState extends ConsumerState<RecordScreen> {
         parentCategories: _parentCategoriesWithChildren,
         childrenByParent: _childrenByParent,
         selectedSubId: _subcategoryId,
+        recordType: _recordType,
         onSelectChild: (childId) {
           setState(() {
             _subcategoryId = childId;
@@ -243,6 +269,7 @@ class _RecordScreenState extends ConsumerState<RecordScreen> {
           });
           Navigator.pop(ctx);
         },
+        onCategoryCreated: _onCategoryCreated,
       ),
     );
   }
@@ -1090,19 +1117,28 @@ class _PickerField extends StatelessWidget {
 // 分类选择底部弹窗
 // ═══════════════════════════════════════════════════════════════
 
-class _CategoryPickerSheet extends StatelessWidget {
+class _CategoryPickerSheet extends StatefulWidget {
   final List<Category> parentCategories;
   final Map<String, List<Category>> childrenByParent;
   final String? selectedSubId;
+  final String recordType;
   final ValueChanged<String> onSelectChild;
+  final void Function(String newCategoryId) onCategoryCreated;
 
   const _CategoryPickerSheet({
     required this.parentCategories,
     required this.childrenByParent,
     required this.selectedSubId,
+    required this.recordType,
     required this.onSelectChild,
+    required this.onCategoryCreated,
   });
 
+  @override
+  State<_CategoryPickerSheet> createState() => _CategoryPickerSheetState();
+}
+
+class _CategoryPickerSheetState extends State<_CategoryPickerSheet> {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
@@ -1114,7 +1150,6 @@ class _CategoryPickerSheet extends StatelessWidget {
       expand: false,
       builder: (context, scrollController) => Column(
         children: [
-          // 拖拽指示条
           Container(
             margin: const EdgeInsets.symmetric(vertical: 12),
             width: 40,
@@ -1130,36 +1165,265 @@ class _CategoryPickerSheet extends StatelessWidget {
           ),
           const SizedBox(height: 12),
           Expanded(
-            child: parentCategories.isEmpty
+            child: widget.parentCategories.isEmpty
                 ? Center(
                     child: Column(
                       mainAxisSize: MainAxisSize.min,
                       children: [
                         Icon(Icons.category_outlined, size: 48, color: theme.colorScheme.outline),
                         const SizedBox(height: 12),
-                        Text('请先在设置中创建分类', style: theme.textTheme.bodyMedium),
+                        Text('暂无分类，请创建', style: theme.textTheme.bodyMedium),
                       ],
                     ),
                   )
                 : ListView.builder(
                     controller: scrollController,
                     padding: const EdgeInsets.symmetric(horizontal: 16),
-                    itemCount: parentCategories.length,
+                    itemCount: widget.parentCategories.length,
                     itemBuilder: (context, index) {
-                      final parent = parentCategories[index];
-                      final children = childrenByParent[parent.id] ?? [];
+                      final parent = widget.parentCategories[index];
+                      final children = widget.childrenByParent[parent.id] ?? [];
                       return _CategoryGroup(
                         parentName: parent.name,
                         parentIcon: _iconForCategory(parent.name, dbIcon: parent.icon),
                         children: children,
-                        selectedSubId: selectedSubId,
-                        onSelectChild: onSelectChild,
+                        selectedSubId: widget.selectedSubId,
+                        onSelectChild: widget.onSelectChild,
                       );
                     },
                   ),
           ),
+          const Divider(height: 1),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+            child: SizedBox(
+              width: double.infinity,
+              child: OutlinedButton.icon(
+                icon: const Icon(Icons.add, size: 18),
+                label: const Text('新建分类'),
+                onPressed: () => _showCreateDialog(context),
+              ),
+            ),
+          ),
         ],
       ),
+    );
+  }
+
+  void _showCreateDialog(BuildContext sheetContext) {
+    showDialog(
+      context: sheetContext,
+      builder: (ctx) => _CreateCategoryDialog(
+        recordType: widget.recordType,
+        parentCategories: widget.parentCategories,
+        onSelectChild: widget.onSelectChild,
+        onCreated: widget.onCategoryCreated,
+      ),
+    );
+  }
+}
+
+/// 分类弹窗内直接新建分类的对话框
+class _CreateCategoryDialog extends StatefulWidget {
+  final String recordType;
+  final List<Category> parentCategories;
+  final ValueChanged<String> onSelectChild;
+  final void Function(String newCategoryId) onCreated;
+
+  const _CreateCategoryDialog({
+    required this.recordType,
+    required this.parentCategories,
+    required this.onSelectChild,
+    required this.onCreated,
+  });
+
+  @override
+  State<_CreateCategoryDialog> createState() => _CreateCategoryDialogState();
+}
+
+class _CreateCategoryDialogState extends State<_CreateCategoryDialog> {
+  String? _selectedParentId;
+  bool _isNewParent = false;
+  final _parentNameCtrl = TextEditingController();
+  final _childNameCtrl = TextEditingController();
+  bool _isCreating = false;
+
+  @override
+  void dispose() {
+    _parentNameCtrl.dispose();
+    _childNameCtrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('新建分类'),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          // ── 父分类选择 ──
+          DropdownButtonFormField<String?>(
+            value: _isNewParent ? null : _selectedParentId,
+            decoration: const InputDecoration(
+              labelText: '所属父分类',
+              border: OutlineInputBorder(),
+              contentPadding: EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+            ),
+            items: [
+              ...widget.parentCategories.map((p) => DropdownMenuItem(
+                    value: p.id,
+                    child: Text(p.name),
+                  )),
+              const DropdownMenuItem(
+                value: null,
+                child: Text('+ 新建一级分类'),
+              ),
+            ],
+            onChanged: (val) {
+              setState(() {
+                if (val == null) {
+                  _isNewParent = true;
+                  _selectedParentId = null;
+                } else {
+                  _isNewParent = false;
+                  _selectedParentId = val;
+                }
+              });
+            },
+          ),
+          const SizedBox(height: 12),
+          // ── 新建一级分类名称（仅当选择「新建」时显示）──
+          if (_isNewParent)
+            TextField(
+              controller: _parentNameCtrl,
+              decoration: const InputDecoration(
+                labelText: '一级分类名称',
+                border: OutlineInputBorder(),
+                contentPadding: EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+              ),
+            ),
+          if (_isNewParent) const SizedBox(height: 12),
+          // ── 子分类名称 ──
+          TextField(
+            controller: _childNameCtrl,
+            decoration: InputDecoration(
+              labelText: _isNewParent ? '二级分类名称（可留空）' : '分类名称',
+              border: const OutlineInputBorder(),
+              contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+            ),
+          ),
+        ],
+      ),
+      actions: [
+        TextButton(
+          onPressed: _isCreating ? null : () => Navigator.of(context).pop(),
+          child: const Text('取消'),
+        ),
+        FilledButton(
+          onPressed: _isCreating ? null : _doCreate,
+          child: _isCreating
+              ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2))
+              : const Text('创建'),
+        ),
+      ],
+    );
+  }
+
+  Future<void> _doCreate() async {
+    final childName = _childNameCtrl.text.trim();
+    final parentName = _parentNameCtrl.text.trim();
+
+    // 验证
+    if (childName.isEmpty && !_isNewParent) {
+      _showSnack('请输入分类名称');
+      return;
+    }
+    if (_isNewParent && parentName.isEmpty && childName.isEmpty) {
+      _showSnack('请输入分类名称');
+      return;
+    }
+
+    setState(() => _isCreating = true);
+
+    try {
+      final container = ProviderScope.containerOf(context);
+      final dao = container.read(categoryDaoProvider);
+      final userId = container.read(currentUserIdProvider);
+      final syncQueue = container.read(syncQueueServiceProvider);
+      final kind = widget.recordType;
+
+      String? actualParentId = _isNewParent ? null : _selectedParentId;
+      String? createdId; // 最终需要选中的分类 ID
+
+      // 情况 2/3：新建一级分类
+      if (_isNewParent && parentName.isNotEmpty) {
+        final parentCatId = IdGenerator.generate();
+        await dao.insertCategory(CategoriesCompanion(
+          id: Value(parentCatId),
+          userId: Value(userId),
+          name: Value(parentName),
+          kind: Value(kind),
+          parentId: const Value.absent(),
+          icon: const Value('category'),
+        ));
+        syncQueue.enqueue(
+          operationType: 'insert',
+          tableName: 'categories',
+          recordId: parentCatId,
+          payload: jsonEncode({
+            'id': parentCatId, 'name': parentName, 'parent_id': null,
+            'icon': 'category', 'kind': kind, 'is_archived': false,
+          }),
+        );
+        actualParentId = parentCatId;
+        if (childName.isEmpty) createdId = parentCatId;
+      }
+
+      // 创建子分类（或其下无父分类时直接创建）
+      if (childName.isNotEmpty) {
+        final childCatId = IdGenerator.generate();
+        await dao.insertCategory(CategoriesCompanion(
+          id: Value(childCatId),
+          userId: Value(userId),
+          name: Value(childName),
+          kind: Value(kind),
+          parentId: Value.absentIfNull(actualParentId),
+          icon: const Value('category'),
+        ));
+        syncQueue.enqueue(
+          operationType: 'insert',
+          tableName: 'categories',
+          recordId: childCatId,
+          payload: jsonEncode({
+            'id': childCatId, 'name': childName, 'parent_id': actualParentId,
+            'icon': 'category', 'kind': kind, 'is_archived': false,
+          }),
+        );
+        createdId = childCatId;
+      }
+
+      syncQueue.processQueue().catchError((_) {});
+
+      if (!mounted) return;
+
+      // 通知父组件刷新并自动选中
+      if (createdId != null) {
+        widget.onCreated(createdId);
+      }
+
+      Navigator.of(context).pop(); // 关闭创建 Dialog
+    } catch (e) {
+      if (mounted) {
+        setState(() => _isCreating = false);
+        _showSnack('创建失败: $e');
+      }
+    }
+  }
+
+  void _showSnack(String msg) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(msg), behavior: SnackBarBehavior.floating),
     );
   }
 }
