@@ -54,6 +54,7 @@ class _RecordScreenState extends ConsumerState<RecordScreen> {
   String _note = '';
   DateTime _occurredAt = DateTime.now();
   bool _isSubmitting = false;
+  bool _showNumpad = true;
 
   // ── 控制器（复用，避免每次 build 重建）──
   late final TextEditingController _noteController;
@@ -211,6 +212,7 @@ class _RecordScreenState extends ConsumerState<RecordScreen> {
 
   /// 弹出分类选择底部弹窗
   void _showCategoryPicker() {
+    setState(() => _showNumpad = false);
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
@@ -237,6 +239,7 @@ class _RecordScreenState extends ConsumerState<RecordScreen> {
 
   /// 弹出账户选择底部弹窗
   void _showAccountPicker() {
+    setState(() => _showNumpad = false);
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
@@ -628,6 +631,7 @@ class _RecordScreenState extends ConsumerState<RecordScreen> {
 
       HapticFeedback.lightImpact();
       if (mounted) {
+        setState(() => _showNumpad = false);
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text(_isEditMode ? '已保存修改' : '已记录 ¥$_amount'),
@@ -696,110 +700,121 @@ class _RecordScreenState extends ConsumerState<RecordScreen> {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
 
-    return Scaffold(
-      appBar: AppBar(
-        title: Text(_isBatchMode || _isEditMode ? '编辑账单' : '记一笔'),
-        actions: _isBatchMode
-            ? null
-            : [
-                IconButton(
-                  icon: const Icon(Icons.auto_awesome),
-                  tooltip: 'AI 智能记账',
-                  onPressed: _showAiDialog,
-                ),
-              ],
-      ),
-      body: SafeArea(
-        child: Column(
-          children: [
-            // ── 金额显示区 ──
-            _AmountDisplay(
-              amount: _amount,
-              recordType: _recordType,
-              theme: theme,
-            ),
-
-            // ── 类型 Tab ──
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-              child: SegmentedButton<String>(
-                segments: const [
-                  ButtonSegment(value: 'expense', label: Text('支出'), icon: Icon(Icons.shopping_cart_outlined)),
-                  ButtonSegment(value: 'income', label: Text('收入'), icon: Icon(Icons.payments_outlined)),
-                  ButtonSegment(value: 'transfer', label: Text('转账'), icon: Icon(Icons.swap_horiz)),
+    return PopScope(
+      canPop: !_showNumpad,
+      onPopInvokedWithResult: (didPop, result) {
+        if (!didPop && _showNumpad) {
+          setState(() => _showNumpad = false);
+        }
+      },
+      child: Scaffold(
+        appBar: AppBar(
+          title: Text(_isBatchMode || _isEditMode ? '编辑账单' : '记一笔'),
+          actions: _isBatchMode
+              ? null
+              : [
+                  IconButton(
+                    icon: const Icon(Icons.auto_awesome),
+                    tooltip: 'AI 智能记账',
+                    onPressed: _showAiDialog,
+                  ),
                 ],
-                selected: {_recordType},
-                onSelectionChanged: (sel) => _onTypeChanged(sel.first),
+        ),
+        body: SafeArea(
+          child: Column(
+            children: [
+              // ── 金额显示区 ──
+              _AmountDisplay(
+                amount: _amount,
+                recordType: _recordType,
+                theme: theme,
+                onTap: () => setState(() => _showNumpad = true),
               ),
-            ),
-            const SizedBox(height: 8),
 
-            // ── 表单区域（可滚动）──
-            Expanded(
-              child: SingleChildScrollView(
-                padding: const EdgeInsets.symmetric(horizontal: 16),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    // 日期快捷选择
-                    _DateRow(date: _occurredAt, onTap: _pickDate, onToday: () => setState(() => _occurredAt = DateTime.now())),
-                    const SizedBox(height: 16),
+              // ── 类型 Tab ──
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+                child: SegmentedButton<String>(
+                  segments: const [
+                    ButtonSegment(value: 'expense', label: Text('支出'), icon: Icon(Icons.shopping_cart_outlined)),
+                    ButtonSegment(value: 'income', label: Text('收入'), icon: Icon(Icons.payments_outlined)),
+                    ButtonSegment(value: 'transfer', label: Text('转账'), icon: Icon(Icons.swap_horiz)),
+                  ],
+                  selected: {_recordType},
+                  onSelectionChanged: (sel) => _onTypeChanged(sel.first),
+                ),
+              ),
+              const SizedBox(height: 8),
 
-                    // 分类选择（支出/收入）—— 点击弹出底部弹窗
-                    if (_recordType != 'transfer') ...[
-                      _PickerField(
-                        label: '选择分类',
-                        selectedName: _selectedCategoryName,
-                        icon: Icons.category_outlined,
-                        onTap: _showCategoryPicker,
-                      ),
-                    ] else ...[
-                      _TransferAccountSelector(
-                        accounts: _accounts,
-                        fromId: _accountId,
-                        toId: _toAccountId,
-                        onFromChanged: (id) => setState(() => _accountId = id),
-                        onToChanged: (id) => setState(() => _toAccountId = id),
-                      ),
-                    ],
+              // ── 表单区域（可滚动）──
+              Expanded(
+                child: SingleChildScrollView(
+                  keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
+                  padding: const EdgeInsets.symmetric(horizontal: 16),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      // 日期快捷选择
+                      _DateRow(date: _occurredAt, onTap: _pickDate, onToday: () => setState(() => _occurredAt = DateTime.now())),
+                      const SizedBox(height: 16),
 
-                    const SizedBox(height: 12),
+                      // 分类选择（支出/收入）—— 点击弹出底部弹窗
+                      if (_recordType != 'transfer') ...[
+                        _PickerField(
+                          label: '选择分类',
+                          selectedName: _selectedCategoryName,
+                          icon: Icons.category_outlined,
+                          onTap: _showCategoryPicker,
+                        ),
+                      ] else ...[
+                        _TransferAccountSelector(
+                          accounts: _accounts,
+                          fromId: _accountId,
+                          toId: _toAccountId,
+                          onFromChanged: (id) => setState(() => _accountId = id),
+                          onToChanged: (id) => setState(() => _toAccountId = id),
+                        ),
+                      ],
 
-                    // 账户选择（非转账）—— 点击弹出底部弹窗
-                    if (_recordType != 'transfer') ...[
-                      _PickerField(
-                        label: '选择账户',
-                        selectedName: _selectedAccountName,
-                        icon: Icons.account_balance_wallet_outlined,
-                        onTap: _showAccountPicker,
+                      const SizedBox(height: 12),
+
+                      // 账户选择（非转账）—— 点击弹出底部弹窗
+                      if (_recordType != 'transfer') ...[
+                        _PickerField(
+                          label: '选择账户',
+                          selectedName: _selectedAccountName,
+                          icon: Icons.account_balance_wallet_outlined,
+                          onTap: _showAccountPicker,
+                        ),
+                        const SizedBox(height: 8),
+                      ],
+
+                      // 备注
+                      TextField(
+                        decoration: const InputDecoration(
+                          hintText: '备注（选填）',
+                          prefixIcon: Icon(Icons.notes),
+                          border: OutlineInputBorder(),
+                          contentPadding: EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+                        ),
+                        controller: _noteController,
+                        onChanged: (v) => _note = v,
                       ),
                       const SizedBox(height: 8),
                     ],
-
-                    // 备注
-                    TextField(
-                      decoration: const InputDecoration(
-                        hintText: '备注（选填）',
-                        prefixIcon: Icon(Icons.notes),
-                        border: OutlineInputBorder(),
-                        contentPadding: EdgeInsets.symmetric(horizontal: 12, vertical: 12),
-                      ),
-                      controller: _noteController,
-                      onChanged: (v) => _note = v,
-                    ),
-                    const SizedBox(height: 8),
-                  ],
+                  ),
                 ),
               ),
-            ),
 
-            // ── 数字键盘 ──
-            _Numpad(
-              onKeyTap: _onKeyTap,
-              isSubmitting: _isSubmitting,
-              isEditMode: _isEditMode || _isBatchMode,
-            ),
-          ],
+              // ── 数字键盘 ──
+              if (_showNumpad)
+                _Numpad(
+                  onKeyTap: _onKeyTap,
+                  isSubmitting: _isSubmitting,
+                  isEditMode: _isEditMode || _isBatchMode,
+                ),
+            ],
+          ),
         ),
       ),
     );
@@ -814,11 +829,13 @@ class _AmountDisplay extends StatelessWidget {
   final String amount;
   final String recordType;
   final ThemeData theme;
+  final VoidCallback? onTap;
 
   const _AmountDisplay({
     required this.amount,
     required this.recordType,
     required this.theme,
+    this.onTap,
   });
 
   @override
@@ -831,16 +848,20 @@ class _AmountDisplay extends StatelessWidget {
             : theme.colorScheme.error;
     final displayAmount = amount.isEmpty ? '0' : amount;
 
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-      child: Text(
-        '$prefix¥ $displayAmount',
-        textAlign: TextAlign.center,
-        style: TextStyle(
-          fontSize: 42,
-          fontWeight: FontWeight.w300,
-          letterSpacing: -1,
-          color: amount.isEmpty ? theme.colorScheme.onSurfaceVariant.withAlpha(128) : color,
+    return GestureDetector(
+      onTap: onTap,
+      behavior: HitTestBehavior.opaque,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+        child: Text(
+          '$prefix¥ $displayAmount',
+          textAlign: TextAlign.center,
+          style: TextStyle(
+            fontSize: 42,
+            fontWeight: FontWeight.w300,
+            letterSpacing: -1,
+            color: amount.isEmpty ? theme.colorScheme.onSurfaceVariant.withAlpha(128) : color,
+          ),
         ),
       ),
     );
