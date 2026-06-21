@@ -41,6 +41,9 @@ dependencies:
   # CSV 格式
   csv: ^6.0.0
 
+  # 本地键值持久化（记住上次选择）
+  shared_preferences: ^2.2.0
+
 dev_dependencies:
   flutter_test:
     sdk: flutter
