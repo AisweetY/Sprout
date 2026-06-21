@@ -15,6 +15,7 @@ import '../insights/insights_provider.dart';
 import '../assets/assets_provider.dart';
 import '../../core/services/text_recognition/models/parsed_transaction.dart';
 import '../../core/services/text_recognition/text_recognition_provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 /// 完整记账页面（重设计版）
 ///
@@ -66,6 +67,13 @@ class _RecordScreenState extends ConsumerState<RecordScreen> {
   // 有子分类的一级分类
   List<Category> _parentCategoriesWithChildren = [];
   List<Account> _accounts = [];
+
+  // ── SharedPreferences 存储键 ──
+  static const _pkType = 'last_record_type';
+  static const _pkCat = 'last_category_id';
+  static const _pkParentCat = 'last_parent_category_id';
+  static const _pkAcct = 'last_account_id';
+  static const _pkToAcct = 'last_to_account_id';
 
   /// 是否为编辑模式
   bool get _isEditMode => widget.editRecord != null;
@@ -149,6 +157,8 @@ class _RecordScreenState extends ConsumerState<RecordScreen> {
             _accountId = accts.first.id;
           }
         });
+        // 两类数据都到位后恢复上次选择
+        _restoreLastSelection();
       }
     });
   }
@@ -657,6 +667,10 @@ class _RecordScreenState extends ConsumerState<RecordScreen> {
         });
       }
       setState(() => _isSubmitting = false);
+
+      if (!_isBatchMode) {
+        _saveLastSelection();
+      }
     } catch (e) {
       if (mounted) {
         setState(() => _isSubmitting = false);
@@ -665,6 +679,100 @@ class _RecordScreenState extends ConsumerState<RecordScreen> {
             SnackBar(content: Text('记录失败: $e'), behavior: SnackBarBehavior.floating),
           );
         }
+      }
+    }
+  }
+
+  // ═════════════════════════════════════════════════════════
+  // 记住上一次选择（SharedPreferences）
+  // ═════════════════════════════════════════════════════════
+
+  Future<void> _saveLastSelection() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_pkType, _recordType);
+    if (_subcategoryId != null) {
+      await prefs.setString(_pkCat, _subcategoryId!);
+    } else if (_categoryId != null) {
+      await prefs.setString(_pkCat, _categoryId!);
+    }
+    if (_categoryId != null) {
+      await prefs.setString(_pkParentCat, _categoryId!);
+    }
+    if (_accountId != null) {
+      await prefs.setString(_pkAcct, _accountId!);
+    }
+    if (_toAccountId != null) {
+      await prefs.setString(_pkToAcct, _toAccountId!);
+    }
+  }
+
+  /// 从 SharedPreferences 恢复上次选择的分类、账户、类型。
+  /// 必须在 _allCategories 和 _accounts 加载完成后调用。
+  Future<void> _restoreLastSelection() async {
+    final prefs = await SharedPreferences.getInstance();
+    final lastType = prefs.getString(_pkType);
+    final lastCatId = prefs.getString(_pkCat);
+    final lastParentCatId = prefs.getString(_pkParentCat);
+    final lastAcctId = prefs.getString(_pkAcct);
+    final lastToAcctId = prefs.getString(_pkToAcct);
+
+    bool needRefresh = false;
+
+    // 1. 恢复类型 Tab（如果和当前默认不同）
+    if (lastType != null && lastType != _recordType) {
+      _recordType = lastType;
+      needRefresh = true;
+    }
+
+    if (needRefresh) {
+      await _refreshCategoriesAsync();
+    }
+
+    if (!mounted) return;
+
+    // 2. 恢复分类：优先二级分类，其次一级分类兜底
+    if (lastCatId != null) {
+      final cat = _allCategories
+          .where((c) => c.id == lastCatId && !c.isArchived)
+          .firstOrNull;
+      if (cat != null) {
+        setState(() {
+          if (cat.parentId != null) {
+            _subcategoryId = lastCatId;
+            _categoryId = cat.parentId;
+          } else {
+            _categoryId = lastCatId;
+            _subcategoryId = null;
+          }
+        });
+      }
+    }
+    if (_categoryId == null && _subcategoryId == null && lastParentCatId != null) {
+      final parent = _allCategories
+          .where((c) => c.id == lastParentCatId && !c.isArchived)
+          .firstOrNull;
+      if (parent != null) {
+        setState(() => _categoryId = lastParentCatId);
+      }
+    }
+
+    // 3. 恢复账户
+    if (lastAcctId != null) {
+      final acct = _accounts
+          .where((a) => a.id == lastAcctId && !a.isArchived)
+          .firstOrNull;
+      if (acct != null) {
+        setState(() => _accountId = lastAcctId);
+      }
+    }
+
+    // 4. 恢复转账转入账户
+    if (lastToAcctId != null && _recordType == 'transfer' && lastToAcctId != _accountId) {
+      final toAcct = _accounts
+          .where((a) => a.id == lastToAcctId && !a.isArchived)
+          .firstOrNull;
+      if (toAcct != null) {
+        setState(() => _toAccountId = lastToAcctId);
       }
     }
   }
