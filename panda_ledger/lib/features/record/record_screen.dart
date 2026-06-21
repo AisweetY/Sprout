@@ -683,6 +683,11 @@ class _RecordScreenState extends ConsumerState<RecordScreen> {
       ref.invalidate(insightsDataProvider);
       ref.invalidate(assetsDataProvider);
 
+      // 保存本次选择（在清空状态之前捕获）
+      if (!_isBatchMode) {
+        _saveLastSelection();
+      }
+
       // 重置表单（新建模式）
       if (!_isEditMode) {
         setState(() {
@@ -694,10 +699,6 @@ class _RecordScreenState extends ConsumerState<RecordScreen> {
         });
       }
       setState(() => _isSubmitting = false);
-
-      if (!_isBatchMode) {
-        _saveLastSelection();
-      }
     } catch (e) {
       if (mounted) {
         setState(() => _isSubmitting = false);
