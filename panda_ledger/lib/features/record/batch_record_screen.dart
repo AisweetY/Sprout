@@ -171,8 +171,8 @@ class _BatchRecordScreenState extends ConsumerState<BatchRecordScreen> {
   Future<void> _batchSave() async {
     if (_cards.isEmpty) return;
 
-    // 检查是否有可保存的记录
-    final validCards = _cards.where((c) => c.parsed.amount != null).toList();
+    // 检查是否有可保存的记录（金额必须 > 0，排除 AI 返回 null 或 0 的无效卡片）
+    final validCards = _cards.where((c) => c.parsed.amount != null && c.parsed.amount! > 0).toList();
     debugPrint('🔍 [batch-save] 总卡片: ${_cards.length}, 有效卡片: ${validCards.length}');
     if (validCards.isEmpty) {
       setState(() => _errorMsg = '没有可保存的记录（缺少金额）');
@@ -348,6 +348,7 @@ class _BatchRecordScreenState extends ConsumerState<BatchRecordScreen> {
                         categoryIcon: null, // 批量解析暂无法获取 DB icon
                         accountName: acctName,
                         note: p.note,
+                        occurredAt: p.occurredAt, // AI 识别的日期（非今天时卡片上显示）
                         leading: ReorderableDragStartListener(
                           index: index,
                           child: Icon(Icons.drag_handle,

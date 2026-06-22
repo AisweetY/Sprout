@@ -107,22 +107,33 @@ final categoryBudgetDataProvider =
   final start = DateTime(params.year, params.month, 1);
   final end = DateTime(params.year, params.month + 1, 1);
 
+  // ═══ 一次 GROUP BY 查询替代 N+1 逐分类查询，并过滤软删除流水 ═══
+  final spentRows = await db.customSelect(
+    '''SELECT r.category_id, COALESCE(SUM(r.amount), 0) as total
+       FROM records r
+       WHERE r.type = 'expense'
+         AND r.occurred_at >= ?
+         AND r.occurred_at < ?
+         AND r.deleted = 0
+         AND r.category_id IS NOT NULL
+       GROUP BY r.category_id''',
+    variables: [
+      Variable.withDateTime(start),
+      Variable.withDateTime(end),
+    ],
+    readsFrom: {db.records},
+  ).get();
+
+  // 构建 categoryId → spent 映射
+  final spentByCategory = <String, double>{};
+  for (final row in spentRows) {
+    final catId = row.read<String>('category_id');
+    final total = row.read<double>('total');
+    spentByCategory[catId] = total;
+  }
+
   for (final cat in activeCategories) {
-    // 查询该分类当月支出
-    final spent = await db.customSelect(
-      '''SELECT COALESCE(SUM(r.amount), 0) as total
-         FROM records r
-         WHERE r.category_id = ?
-           AND r.type = 'expense'
-           AND r.occurred_at >= ?
-           AND r.occurred_at < ?''',
-      variables: [
-        Variable.withString(cat.id),
-        Variable.withDateTime(start),
-        Variable.withDateTime(end),
-      ],
-      readsFrom: {db.records},
-    ).map((row) => row.read<double>('total')).getSingle();
+    final spent = spentByCategory[cat.id] ?? 0.0;
 
     totalExpense += spent;
 

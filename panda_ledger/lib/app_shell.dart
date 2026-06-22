@@ -84,8 +84,18 @@ class _AppShellState extends ConsumerState<AppShell>
     }
 
     // 3. 推送本地离线期间积累的变更
-    syncService.processQueue().catchError((e) {
+    await syncService.processQueue().catchError((e) {
       debugPrint('启动同步推送失败: $e');
+    });
+
+    // 3.5 一致性对账：修复 processQueue 未完整执行 / conflict 记录
+    await syncService.reconcileOnStartup().catchError((e) {
+      debugPrint('启动对账失败: $e');
+    });
+
+    // 对账可能重新入队了记录 → 再推一次
+    syncService.processQueue().catchError((e) {
+      debugPrint('对账后同步推送失败: $e');
     });
 
     // 4. 启动后台定时同步

@@ -28,6 +28,10 @@ class SyncQueueService {
 
   SyncQueueService({required this.dao, required this.db});
 
+  /// 并发保护：防止启动/恢复/定时器/写入同时处理同一批队列项
+  bool _isProcessing = false;
+  bool _needsReprocess = false;
+
   /// 加入同步队列
   Future<void> enqueue({
     required String operationType,
@@ -47,8 +51,35 @@ class SyncQueueService {
 
   /// 处理队列 — 推送至 Supabase
   ///
-  /// 调用时机：记账后立即触发 + 应用启动时批量处理
+  /// 调用时机：记账后立即触发 + 应用启动时批量处理。
+  /// 内置并发保护：若已有处理在进行中，标记需要重新处理而非并发执行。
   Future<void> processQueue() async {
+    // ═══ 并发保护：若已在处理，标记需要重处理 ═══
+    if (_isProcessing) {
+      _needsReprocess = true;
+      debugPrint('🟡 [同步链路-节点4] processQueue 已在处理中，标记延迟重处理');
+      return;
+    }
+
+    _isProcessing = true;
+    _needsReprocess = false;
+
+    try {
+      await _processQueueInternal();
+    } finally {
+      _isProcessing = false;
+      // ═══ 处理期间有新入队请求 → 再跑一次 ═══
+      if (_needsReprocess) {
+        _needsReprocess = false;
+        debugPrint('🟡 [同步链路-节点4] 执行延迟重处理');
+        // 不递归调用，调度到下一微任务避免栈溢出
+        Future.microtask(() => processQueue());
+      }
+    }
+  }
+
+  /// processQueue 的内部实现，由 processQueue() 加锁后调用
+  Future<void> _processQueueInternal() async {
     final items = await dao.getPendingItems();
     debugPrint('🟡 [同步链路-节点4] processQueue 被调用，待处理队列长度: ${items.length}');
 
@@ -94,6 +125,14 @@ class SyncQueueService {
       } catch (e) {
         debugPrint('🔴 [同步链路-节点4] 推送失败: ${item.tblName}.${item.recordId}, '
             '错误: $e, 重试次数: ${item.retryCount}');
+
+        // ═══ 网络不可达：保留队列项，不消耗重试配额 ═══
+        if (_isNetworkUnreachable(e)) {
+          debugPrint('🟡 [同步链路-节点4] 网络不可达，保留剩余 ${items.length - items.indexOf(item)} 个队列项等待网络恢复');
+          return; // 跳出 for 循环，所有未处理项留在队列里
+        }
+
+        // ═══ 服务端/数据错误：正常重试计数 ═══
         if (item.retryCount < 5) {
           await dao.incrementRetry(item.id);
         } else {
@@ -190,8 +229,9 @@ class SyncQueueService {
         }
       }
     } catch (e) {
-      // 余额同步失败不阻塞流水已推送的事实，仅记录日志
       debugPrint('🔴 [同步链路-余额] 更新 Supabase 账户余额失败: $e');
+      // 余额同步失败不应阻止记录出队：记录本身已成功写入 Supabase，
+      // 账户余额可通过下次 pull 或其他同步周期自行修复。不 rethrow。
     }
   }
 
@@ -317,6 +357,33 @@ class SyncQueueService {
     }
   }
 
+  /// 判断异常是否为网络不可达（断网/DNS 失败/超时/连接被拒）
+  ///
+  /// 这类错误重试无意义，应保留队列项等待网络恢复；
+  /// 与服务端错误（4xx/5xx）区分，后者才消耗重试次数。
+  bool _isNetworkUnreachable(Object e) {
+    final msg = e.toString().toLowerCase();
+    const unreachablePatterns = [
+      'socketexception',
+      'timeoutexception',
+      'handshakeexception',
+      'clientsocketexception',
+      'connection refused',
+      'connection reset',
+      'network is unreachable',
+      'no route to host',
+      'host lookup failed',
+      'failed host lookup',
+      'connection timed out',
+      'connection closed',
+      'connection failed',
+      'network error',
+      'internet connection',
+      'websocketexception',
+    ];
+    return unreachablePatterns.any((p) => msg.contains(p));
+  }
+
   /// 从 Supabase 增量拉取（支持 LWW 冲突解决）
   ///
   /// - 首次调用：全量拉取所有数据
@@ -359,19 +426,40 @@ class SyncQueueService {
       }
 
       // ═══ 3. 拉取 records ═══
-      var recQuery = supabase
-          .from('records')
-          .select()
-          .eq('user_id', userId)
-          .order('updated_at', ascending: false);
       if (lastPullAt != null) {
+        // 增量拉取：仅拉取 updated_at >= lastPullAt 的变更
+        var recQuery = supabase
+            .from('records')
+            .select()
+            .eq('user_id', userId)
+            .order('updated_at', ascending: false);
         recQuery = _addIncrementalFilter(recQuery, 'updated_at', lastPullAt);
+        final remoteRecords = await recQuery;
+        for (final r in remoteRecords) {
+          await _upsertRecordFromRemote(r);
+        }
       } else {
-        recQuery = recQuery.limit(500);
-      }
-      final remoteRecords = await recQuery;
-      for (final r in remoteRecords) {
-        await _upsertRecordFromRemote(r);
+        // 首次全量拉取：分页遍历，避免 limit(500) 截断旧数据。
+        // 使用 range offset 而非 updated_at > cursor，防止同时间戳漏数据。
+        int offset = 0;
+        bool hasMore = true;
+        while (hasMore) {
+          final page = await supabase
+              .from('records')
+              .select()
+              .eq('user_id', userId)
+              .order('updated_at', ascending: true)
+              .order('id')
+              .range(offset, offset + 499); // 500 条/页
+          for (final r in page) {
+            await _upsertRecordFromRemote(r);
+          }
+          if ((page as List).length < 500) {
+            hasMore = false;
+          } else {
+            offset += 500;
+          }
+        }
       }
 
       // ═══ 4. 拉取 budgets ═══
@@ -394,6 +482,168 @@ class SyncQueueService {
     } catch (e) {
       debugPrint('🔴 [同步链路-Pull] 拉取失败: $e');
       // 拉取失败不阻塞本地使用
+    }
+  }
+
+  /// 启动时一致性对账：将 sync_status != 'synced' 的记录重新入队
+  ///
+  /// 覆盖场景：
+  ///   - processQueue 中途被 App 强杀 — 部分记录推送成功但本地未标记 synced
+  ///   - 记录因 5xx 被标记 conflict 出队，但 Supabase 后来恢复了
+  ///   - 网络恢复后之前"掉队"的记录自动找回
+  ///
+  /// 不做云端查询：upsert 是幂等的，直接入队让 processQueue 处理即可。
+  /// 通常在 pullFromSupabase + processQueue 完成后调用。
+  Future<void> reconcileOnStartup() async {
+    debugPrint('🟡 [对账] 开始启动一致性对账...');
+
+    final tables = ['records', 'accounts', 'categories', 'budgets'];
+    int totalReenqueued = 0;
+
+    for (final tableName in tables) {
+      final count = await _reconcileTable(tableName);
+      totalReenqueued += count;
+    }
+
+    if (totalReenqueued > 0) {
+      debugPrint('🟢 [对账] 一致性对账完成，重新入队 $totalReenqueued 条记录');
+    } else {
+      debugPrint('🟢 [对账] 一致性对账完成，无需修复');
+    }
+  }
+
+  /// 对单张表：找到 sync_status != 'synced' 的记录，重新入队
+  Future<int> _reconcileTable(String tableName) async {
+    final localIds = await _getUnsyncedIds(tableName);
+    if (localIds.isEmpty) return 0;
+
+    debugPrint('🟡 [对账] $tableName: 发现 ${localIds.length} 条未同步记录，重新入队...');
+
+    int reenqueuedCount = 0;
+    for (final id in localIds) {
+      final enqueued = await _reenqueueMissing(tableName, id);
+      if (enqueued) reenqueuedCount++;
+    }
+
+    if (reenqueuedCount > 0) {
+      debugPrint('🟢 [对账] $tableName: 重新入队 $reenqueuedCount 条');
+    }
+    return reenqueuedCount;
+  }
+
+  /// 获取表中 sync_status != 'synced' 的记录 ID 列表
+  Future<List<String>> _getUnsyncedIds(String tableName) async {
+    switch (tableName) {
+      case 'records':
+        // records 不过滤 deleted：软删除也是需要同步到云端的变更
+        final rows = await (db.select(db.records)
+              ..where((t) => t.syncStatus.equals('pending') | t.syncStatus.equals('conflict')))
+            .get();
+        return rows.map((r) => r.id).toList();
+      case 'accounts':
+        final rows = await (db.select(db.accounts)
+              ..where((t) => t.syncStatus.equals('pending') | t.syncStatus.equals('conflict')))
+            .get();
+        return rows.map((r) => r.id).toList();
+      case 'categories':
+        final rows = await (db.select(db.categories)
+              ..where((t) => t.syncStatus.equals('pending') | t.syncStatus.equals('conflict')))
+            .get();
+        return rows.map((r) => r.id).toList();
+      case 'budgets':
+        final rows = await (db.select(db.budgets)
+              ..where((t) => t.syncStatus.equals('pending') | t.syncStatus.equals('conflict')))
+            .get();
+        return rows.map((r) => r.id).toList();
+      default:
+        return [];
+    }
+  }
+
+  /// 将缺失的云端记录重新入队，返回 true 表示实际入队了
+  Future<bool> _reenqueueMissing(String tableName, String recordId) async {
+    // 避免重复入队：检查是否已在队列中
+    final existing = await (db.select(db.syncQueue)
+          ..where((t) => t.recordId.equals(recordId) & t.tblName.equals(tableName)))
+        .getSingleOrNull();
+    if (existing != null) return false;
+
+    // 从本地读取当前数据，构建 payload
+    final payload = await _buildPayloadFromLocal(tableName, recordId);
+    if (payload == null) return false;
+
+    await dao.enqueue(
+      SyncQueueCompanion(
+        operationType: const Value('upsert'),
+        tblName: Value(tableName),
+        recordId: Value(recordId),
+        payload: Value(payload),
+      ),
+    );
+    return true;
+  }
+
+  /// 从本地 DB 读取记录数据并构建同步 payload
+  Future<String?> _buildPayloadFromLocal(String tableName, String recordId) async {
+    switch (tableName) {
+      case 'records':
+        final row = await (db.select(db.records)..where((t) => t.id.equals(recordId))).getSingleOrNull();
+        if (row == null) return null;
+        return jsonEncode({
+          'id': row.id,
+          'account_id': row.accountId,
+          'to_account_id': row.toAccountId,
+          'amount': row.amount,
+          'type': row.type,
+          'category_id': row.categoryId,
+          'note': row.note,
+          'occurred_at': row.occurredAt.toIso8601String(),
+          'source': row.source,
+          'deleted': row.deleted,
+          'updated_at': row.updatedAt.toIso8601String(),
+        });
+      case 'accounts':
+        final row = await (db.select(db.accounts)..where((t) => t.id.equals(recordId))).getSingleOrNull();
+        if (row == null) return null;
+        return jsonEncode({
+          'id': row.id,
+          'name': row.name,
+          'type': row.type,
+          'balance': row.balance,
+          'currency': 'CNY',
+          'is_liability': row.isLiability,
+          'include_in_net': row.includeInNet,
+          'is_archived': row.isArchived,
+          'deleted': row.deleted,
+          'updated_at': row.updatedAt.toIso8601String(),
+        });
+      case 'categories':
+        final row = await (db.select(db.categories)..where((t) => t.id.equals(recordId))).getSingleOrNull();
+        if (row == null) return null;
+        return jsonEncode({
+          'id': row.id,
+          'name': row.name,
+          'parent_id': row.parentId,
+          'icon': row.icon,
+          'kind': row.kind,
+          'is_archived': row.isArchived,
+          'deleted': row.deleted,
+          'updated_at': row.updatedAt.toIso8601String(),
+        });
+      case 'budgets':
+        final row = await (db.select(db.budgets)..where((t) => t.id.equals(recordId))).getSingleOrNull();
+        if (row == null) return null;
+        return jsonEncode({
+          'id': row.id,
+          'month': row.month,
+          'type': row.type,
+          'category_id': row.categoryId,
+          'target_amount': row.targetAmount,
+          'deleted': row.deleted,
+          'updated_at': row.updatedAt.toIso8601String(),
+        });
+      default:
+        return null;
     }
   }
 

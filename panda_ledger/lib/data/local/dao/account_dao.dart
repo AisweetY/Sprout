@@ -49,10 +49,14 @@ class AccountDao extends DatabaseAccessor<AppDatabase> with _$AccountDaoMixin {
     return into(db.accounts).insert(account);
   }
 
-  /// 更新账户余额
+  /// 更新账户余额（同时更新 updatedAt 和 syncStatus，防止 LWW 用旧云端覆盖新本地）
   Future<void> updateBalance(String id, double newBalance) {
     return (update(db.accounts)..where((t) => t.id.equals(id))).write(
-      AccountsCompanion(balance: Value(newBalance)),
+      AccountsCompanion(
+        balance: Value(newBalance),
+        updatedAt: Value(DateTime.now()),
+        syncStatus: const Value('pending'),
+      ),
     );
   }
 
@@ -64,14 +68,22 @@ class AccountDao extends DatabaseAccessor<AppDatabase> with _$AccountDaoMixin {
   /// 归档账户
   Future<void> archiveAccount(String id) {
     return (update(db.accounts)..where((t) => t.id.equals(id))).write(
-      const AccountsCompanion(isArchived: Value(true)),
+      AccountsCompanion(
+        isArchived: const Value(true),
+        updatedAt: Value(DateTime.now()),
+        syncStatus: const Value('pending'),
+      ),
     );
   }
 
   /// 取消归档账户
   Future<void> unarchiveAccount(String id) {
     return (update(db.accounts)..where((t) => t.id.equals(id))).write(
-      const AccountsCompanion(isArchived: Value(false)),
+      AccountsCompanion(
+        isArchived: const Value(false),
+        updatedAt: Value(DateTime.now()),
+        syncStatus: const Value('pending'),
+      ),
     );
   }
 

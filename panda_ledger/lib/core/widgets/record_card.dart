@@ -22,6 +22,8 @@ class RecordCard extends StatelessWidget {
   final VoidCallback? onDelete; // null = 不显示左滑删除
   final Widget? leading; // 可选前置 widget（如拖拽手柄）
   final String syncStatus; // 'pending' / 'synced' / 'conflict'
+  /// 可选：记账日期。非 null 且不是今天时，在备注行旁边显示日期提示
+  final DateTime? occurredAt;
 
   const RecordCard({
     super.key,
@@ -36,7 +38,28 @@ class RecordCard extends StatelessWidget {
     this.onDelete,
     this.leading,
     this.syncStatus = 'synced',
+    this.occurredAt,
   });
+
+  /// 判断 occurredAt 是否与今天不同（年月日任意一项不同），用于决定是否显示日期标签
+  bool get _showDate {
+    if (occurredAt == null) return false;
+    final now = DateTime.now();
+    return occurredAt!.year != now.year ||
+        occurredAt!.month != now.month ||
+        occurredAt!.day != now.day;
+  }
+
+  /// 格式化日期为 M月d日 或 yyyy年M月d日（跨年时加年份）
+  String get _dateLabel {
+    if (occurredAt == null) return '';
+    final now = DateTime.now();
+    final d = occurredAt!;
+    if (d.year != now.year) {
+      return '${d.year}年${d.month}月${d.day}日';
+    }
+    return '${d.month}月${d.day}日';
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -158,20 +181,49 @@ class RecordCard extends StatelessWidget {
                 ],
               ),
 
-              // 备注（独立第二行）
-              if (note != null && note!.isNotEmpty) ...[
+              // 第二行：备注 + 日期标签（两者均可选，至少有一个才显示该行）
+              if ((note != null && note!.isNotEmpty) || _showDate) ...[
                 const SizedBox(height: 4),
                 Padding(
                   padding: EdgeInsets.only(
                     left: (leading != null ? 28 : 0) + 42,
                   ),
-                  child: Text(
-                    note!,
-                    style: theme.textTheme.bodySmall?.copyWith(
-                      color: theme.colorScheme.outline,
-                    ),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
+                  child: Row(
+                    children: [
+                      // 日期标签（非今天才显示）
+                      if (_showDate) ...[
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 5, vertical: 1),
+                          decoration: BoxDecoration(
+                            color: theme.colorScheme.secondaryContainer
+                                .withAlpha(160),
+                            borderRadius: BorderRadius.circular(4),
+                          ),
+                          child: Text(
+                            _dateLabel,
+                            style: theme.textTheme.labelSmall?.copyWith(
+                              color: theme.colorScheme.onSecondaryContainer,
+                              fontSize: 11,
+                            ),
+                          ),
+                        ),
+                        if (note != null && note!.isNotEmpty)
+                          const SizedBox(width: 6),
+                      ],
+                      // 备注
+                      if (note != null && note!.isNotEmpty)
+                        Expanded(
+                          child: Text(
+                            note!,
+                            style: theme.textTheme.bodySmall?.copyWith(
+                              color: theme.colorScheme.outline,
+                            ),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                    ],
                   ),
                 ),
               ],

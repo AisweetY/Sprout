@@ -29,6 +29,15 @@ class EdgeFunctionAiService implements IAiParsingService {
     this.timeout = const Duration(seconds: 30),
   });
 
+  /// 将 DateTime 格式化为 YYYY-MM-DD 字符串（本地时区）
+  String _todayString() {
+    final now = DateTime.now();
+    final y = now.year.toString().padLeft(4, '0');
+    final m = now.month.toString().padLeft(2, '0');
+    final d = now.day.toString().padLeft(2, '0');
+    return '$y-$m-$d';
+  }
+
   @override
   Future<ParsedTransaction> parse({
     required String userInput,
@@ -46,6 +55,7 @@ class EdgeFunctionAiService implements IAiParsingService {
             body: {
               'mode': 'single',
               'input_text': userInput.trim(),
+              'today': _todayString(), // 传入本地今日日期，用于 AI 换算相对时间词
             },
           )
           .timeout(timeout);
@@ -89,6 +99,7 @@ class EdgeFunctionAiService implements IAiParsingService {
             body: {
               'mode': 'batch',
               'input_text': userInput.trim(),
+              'today': _todayString(), // 传入本地今日日期，用于 AI 换算相对时间词
             },
           )
           .timeout(timeout);

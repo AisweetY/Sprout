@@ -43,14 +43,18 @@ interface ProviderConfig {
 interface RequestBody {
   mode: "single" | "batch";
   input_text: string;
+  /** 客户端传入的今日日期，格式 YYYY-MM-DD，用于 AI 换算"昨天"/"上周五"等相对时间词 */
+  today?: string;
 }
 
 // ═══════════════════════════════════════════════════════════════
 // 提示词模板（与 App 原版保持一致）
 // ═══════════════════════════════════════════════════════════════
 
-function singleSystemPrompt(catList: string, acctList: string): string {
+function singleSystemPrompt(catList: string, acctList: string, today: string): string {
   return `你是一个记账助手。用户会用中文描述一笔账单，你需要提取结构化信息并返回 JSON。
+
+今天的日期是：${today}
 
 ## 字段说明
 - type: "expense"（支出）或 "income"（收入）
@@ -62,7 +66,7 @@ function singleSystemPrompt(catList: string, acctList: string): string {
 - accountName: 账户名称，从候选列表中做语义匹配
 - accountId: 账户 ID（候选列表中有），对应 accountName；匹配不到则设为 null
 - note: 一句完整通顺的中文自然语言描述，概括这笔账单的关键信息（如"购买钢笔一支"、"打车去公司"、"午餐宫保鸡丁饭"），不要分词堆砌，不要只有关键词
-- occurredAt: ISO 8601 日期字符串，默认今天
+- occurredAt: ISO 8601 日期字符串（仅日期部分，格式 YYYY-MM-DD），从文本中提取时间词（昨天/上周五/3月15日等）并以今天（${today}）为基准换算出实际日期；无明确日期则设为今天
 - matchType: "existing"（已有分类匹配）/ "suggestNew"（建议新分类）/ "partial"（部分识别）
 - newCategorySuggestion: 当 matchType 为 "suggestNew" 时的建议分类名，格式为"一级分类名→二级分类名"
 - confidence: 0.0~1.0 之间的置信度
@@ -78,12 +82,15 @@ ${acctList}
 2. **分类匹配不到**：如果找不到合适的已有分类，matchType 设为 "suggestNew"，newCategorySuggestion 格式为"一级分类名→二级分类"（如"餐饮→快餐"）。
 3. **账户模糊匹配**：用户可能用简称（如"花呗"指"支付宝花呗"），请在已有账户列表中按语义匹配最近的账户。如果确实匹配不到任何已有账户，accountId 和 accountName 都设为 null（不要凭空生成账户名称）。
 4. **金额转换**：金额单位如果是"万"，转换为数字（如 1万 = 10000）。
-5. **备注生成**：note 必须是完整通顺的中文短句，读起来像自然的日常记账备注。例如："午餐点了一份宫保鸡丁饭，花费35元"→"午餐宫保鸡丁饭"；"昨天打车从公司回家花了32元"→"打车回家"。不要分词堆砌。
-6. 只返回 JSON，不要其他文字`;
+5. **日期换算**：以今天（${today}）为基准，将文本中的相对时间词换算为实际日期（"昨天"→前一天，"上周五"→上个周五，"3月15日"→今年或上一年的3月15日，无日期→今天）。
+6. **备注生成**：note 必须是完整通顺的中文短句，读起来像自然的日常记账备注。例如："午餐点了一份宫保鸡丁饭，花费35元"→"午餐宫保鸡丁饭"；"昨天打车从公司回家花了32元"→"打车回家"。不要分词堆砌。
+7. 只返回 JSON，不要其他文字`;
 }
 
-function batchSystemPrompt(catList: string, acctList: string): string {
+function batchSystemPrompt(catList: string, acctList: string, today: string): string {
   return `你是批量记账助手。用户输入一段文本，可能包含多笔独立的收支记录。
+
+今天的日期是：${today}
 
 ## 工作步骤
 1. **拆分**：先判断输入文本中包含几笔独立的收支事件。按消费/收入行为拆分，不要仅按标点分割。例如："中午吃饭35元，晚上看电影60元"应拆为2笔。
@@ -100,7 +107,7 @@ function batchSystemPrompt(catList: string, acctList: string): string {
 - accountName: 账户名称，从候选列表语义匹配；匹配不到则设为 null
 - accountId: 账户 ID，匹配不到则设为 null
 - note: 完整通顺的中文短句，不是分词堆砌
-- occurredAt: 不输出此字段，日期由 App 端统一设为当天
+- occurredAt: ISO 8601 日期字符串（仅日期部分，格式 YYYY-MM-DD），从本笔记录上下文中提取时间词，以今天（${today}）为基准换算出实际日期；同一段文本中多笔记录可有不同日期（如"昨天吃饭…今天打车…"）；无明确日期则设为今天
 - matchType: "existing" / "suggestNew" / "partial"
 - newCategorySuggestion: 当 matchType 为 "suggestNew" 时，格式"一级分类名→二级分类名"
 - confidence: 0.0~1.0
@@ -118,8 +125,61 @@ ${acctList}
 4. **账户模糊匹配**：优先在已有账户列表中匹配。如果确实匹配不到，accountId 和 accountName 设为 null。
 5. **金额转换**："万"转换为数字（1万=10000）。
 6. **备注生成**：每笔的 note 必须是完整通顺的中文短句。
-7. **不要识别日期**：不要从文本中提取日期信息，occurredAt 字段不要输出。
+7. **日期提取**：识别每笔记录附近的时间词（昨天/上周五/3月15日/前天/大前天等），以今天（${today}）为基准换算为实际日期填入 occurredAt。同一段输入中不同笔记录可以有不同日期，不要强制统一。无明确日期则设为今天。
 8. 只返回 JSON 数组，不要其他文字`;
+}
+
+// ═══════════════════════════════════════════════════════════════
+// 返回值校验：防止 AI 幻觉产生非法数据污染客户端
+// ═══════════════════════════════════════════════════════════════
+
+const VALID_TYPES = new Set(["expense", "income", "transfer", "adjustment"]);
+
+function validateSingleResult(raw: unknown): Record<string, unknown> {
+  if (typeof raw !== "object" || raw === null) {
+    return { _invalid: true, _reason: "返回值不是对象" };
+  }
+
+  const item = raw as Record<string, unknown>;
+
+  // 1. type 校验：必须是 expense 或 income
+  if (typeof item.type === "string" && !VALID_TYPES.has(item.type)) {
+    item.type = "expense"; // 非法 type 回退为支出
+    item._typeCorrected = true;
+  }
+  if (typeof item.type !== "string") {
+    item.type = "expense";
+    item._typeDefaulted = true;
+  }
+
+  // 2. amount 校验：必须是正数，无效则设为 null（前端据此过滤）
+  const amt = Number(item.amount);
+  if (isNaN(amt) || amt <= 0) {
+    item.amount = null;
+    item._amountInvalid = true;
+  } else {
+    item.amount = amt;
+  }
+
+  // 3. subcategoryId / accountId：如果存在但不是字符串，清除
+  if (item.subcategoryId !== undefined && item.subcategoryId !== null && typeof item.subcategoryId !== "string") {
+    item.subcategoryId = null;
+  }
+  if (item.accountId !== undefined && item.accountId !== null && typeof item.accountId !== "string") {
+    item.accountId = null;
+  }
+
+  // 4. note：必须是字符串
+  if (item.note !== undefined && typeof item.note !== "string") {
+    item.note = String(item.note ?? "");
+  }
+
+  // 5. confidence 截断到 0~1
+  if (typeof item.confidence === "number") {
+    item.confidence = Math.max(0, Math.min(1, item.confidence));
+  }
+
+  return item;
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -174,7 +234,7 @@ serve(async (req: Request): Promise<Response> => {
 
     // ── 2. 解析请求参数 ──
     const body: RequestBody = await req.json().catch(() => ({} as RequestBody));
-    const { mode, input_text } = body;
+    const { mode, input_text, today: clientToday } = body;
 
     if (!mode || !input_text) {
       return jsonResponse(
@@ -189,6 +249,15 @@ serve(async (req: Request): Promise<Response> => {
 
     if (input_text.trim().length === 0) {
       return jsonResponse({ error: "input_text 不能为空" }, 400);
+    }
+
+    // ── 输入长度限制：防止恶意超长输入消耗 API 配额 ──
+    const MAX_INPUT_LENGTH = 2000;
+    if (input_text.length > MAX_INPUT_LENGTH) {
+      return jsonResponse(
+        { error: `输入文本过长（${input_text.length} 字符），最多允许 ${MAX_INPUT_LENGTH} 字符` },
+        400
+      );
     }
 
     // ── 3. 查询生效的 AI 提供商配置 ──
@@ -241,10 +310,13 @@ serve(async (req: Request): Promise<Response> => {
       .map(([name, id]) => `- ${name} (id: ${id})`)
       .join("\n");
 
+    // 优先使用客户端传入的日期（客户端时区更准确），fallback 到服务端当天
+    const today = clientToday ?? new Date().toISOString().slice(0, 10);
+
     const systemPrompt =
       mode === "batch"
-        ? batchSystemPrompt(catList, acctList)
-        : singleSystemPrompt(catList, acctList);
+        ? batchSystemPrompt(catList, acctList, today)
+        : singleSystemPrompt(catList, acctList, today);
 
     // ── 7. 调用 AI 服务 ──
     const controller = new AbortController();
@@ -329,9 +401,10 @@ serve(async (req: Request): Promise<Response> => {
       );
     }
 
-    // ── 9. 返回结构化结果 ──
+    // ── 9. 校验并清理返回值（单笔模式）──
     if (mode === "single") {
-      return jsonResponse({ data: parsed });
+      const validated = validateSingleResult(parsed);
+      return jsonResponse({ data: validated });
     }
 
     // batch 模式：规范化数组输出
@@ -347,12 +420,14 @@ serve(async (req: Request): Promise<Response> => {
       list = [];
     }
 
-    // 过滤掉完全无结果的条目
-    const filtered = list.filter((item: unknown) => {
-      if (typeof item !== "object" || item === null) return false;
-      const t = item as Record<string, unknown>;
-      return t.amount != null || t.type != null;
-    });
+    // 逐条校验 + 过滤无效条目
+    const filtered = list
+      .filter((item: unknown) => {
+        if (typeof item !== "object" || item === null) return false;
+        const t = item as Record<string, unknown>;
+        return t.amount != null || t.type != null;
+      })
+      .map((item: unknown) => validateSingleResult(item));
 
     return jsonResponse({ data: filtered });
   } catch (err) {

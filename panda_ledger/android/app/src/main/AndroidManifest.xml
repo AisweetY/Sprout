@@ -1,4 +1,6 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Release 包需要显式声明，debug/profile 版本已在各自的 manifest 中声明 -->
+    <uses-permission android:name="android.permission.INTERNET" />
     <application
         android:label="熊猫记账"
         android:name="${applicationName}"

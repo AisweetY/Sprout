@@ -6,6 +6,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/constants.dart';
 import '../../core/utils/category_icon_utils.dart';
 import '../../core/utils/id_generator.dart';
+import '../../core/utils/snackbar_utils.dart';
 import '../../data/local/app_database_provider.dart';
 import '../../data/local/database.dart';
 import '../../data/repository/record_repository.dart';
@@ -134,32 +135,31 @@ class _RecordScreenState extends ConsumerState<RecordScreen> {
     final categoryDao = ref.read(categoryDaoProvider);
     final accountRepo = ref.read(accountRepositoryProvider);
 
-    categoryDao.getCategoriesByKind(_recordType).then((cats) {
-      if (mounted) {
-        setState(() {
-          _allCategories = cats;
-          _rebuildCategoryGroups();
-          // 编辑/batch 模式：反查子分类的父级
-          if ((_isEditMode || _isBatchMode) && _categoryId != null) {
-            final cat = cats.where((c) => c.id == _categoryId).firstOrNull;
-            if (cat != null && cat.parentId != null) {
-              _subcategoryId = _categoryId;
-              _categoryId = cat.parentId;
-            }
+    Future.wait([
+      categoryDao.getCategoriesByKind(_recordType),
+      accountRepo.getActiveAccounts(),
+    ]).then((results) {
+      if (!mounted) return;
+      final cats = results[0] as List<Category>;
+      final accts = results[1] as List<Account>;
+      setState(() {
+        _allCategories = cats;
+        _accounts = accts;
+        _rebuildCategoryGroups();
+        // 编辑/batch 模式：反查子分类的父级
+        if ((_isEditMode || _isBatchMode) && _categoryId != null) {
+          final cat = cats.where((c) => c.id == _categoryId).firstOrNull;
+          if (cat != null && cat.parentId != null) {
+            _subcategoryId = _categoryId;
+            _categoryId = cat.parentId;
           }
-        });
-      }
-    });
-
-    accountRepo.getActiveAccounts().then((accts) {
-      if (mounted) {
-        setState(() {
-          _accounts = accts;
-          if (accts.isNotEmpty && _accountId == null) {
-            _accountId = accts.first.id;
-          }
-        });
-        // 两类数据都到位后恢复上次选择
+        }
+        if (accts.isNotEmpty && _accountId == null) {
+          _accountId = accts.first.id;
+        }
+      });
+      // 只在无预填数据时恢复上次选择，避免覆盖编辑/批量记账的预填值
+      if (!_isEditMode && widget.batchParsed == null) {
         _restoreLastSelection();
       }
     });
@@ -669,12 +669,10 @@ class _RecordScreenState extends ConsumerState<RecordScreen> {
       HapticFeedback.lightImpact();
       if (mounted) {
         setState(() => _showNumpad = false);
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(_isEditMode ? '已保存修改' : '已记录 ¥$_amount'),
-            behavior: SnackBarBehavior.floating,
-            duration: const Duration(seconds: 1),
-          ),
+        SnackbarUtils.show(
+          context: context,
+          message: _isEditMode ? '已保存修改' : '已记录 ¥$_amount',
+          duration: const Duration(seconds: 1),
         );
       }
 
@@ -683,9 +681,15 @@ class _RecordScreenState extends ConsumerState<RecordScreen> {
       ref.invalidate(insightsDataProvider);
       ref.invalidate(assetsDataProvider);
 
-      // 保存本次选择（在清空状态之前捕获）
+      // 保存本次选择（在清空状态之前同步捕获值，避免异步问题）
       if (!_isBatchMode) {
-        _saveLastSelection();
+        _saveLastSelection(
+          type: _recordType,
+          catId: _subcategoryId ?? _categoryId,
+          parentCatId: _categoryId,
+          acctId: _accountId,
+          toAcctId: _toAccountId,
+        );
       }
 
       // 重置表单（新建模式）
@@ -703,9 +707,7 @@ class _RecordScreenState extends ConsumerState<RecordScreen> {
       if (mounted) {
         setState(() => _isSubmitting = false);
         if (!_isBatchMode) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('记录失败: $e'), behavior: SnackBarBehavior.floating),
-          );
+          SnackbarUtils.showError(context: context, message: '记录失败: $e');
         }
       }
     }
@@ -715,22 +717,28 @@ class _RecordScreenState extends ConsumerState<RecordScreen> {
   // 记住上一次选择（SharedPreferences）
   // ═════════════════════════════════════════════════════════
 
-  Future<void> _saveLastSelection() async {
+  Future<void> _saveLastSelection({
+    String? type,
+    String? catId,
+    String? parentCatId,
+    String? acctId,
+    String? toAcctId,
+  }) async {
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(_pkType, _recordType);
-    if (_subcategoryId != null) {
-      await prefs.setString(_pkCat, _subcategoryId!);
-    } else if (_categoryId != null) {
-      await prefs.setString(_pkCat, _categoryId!);
+    if (type != null) {
+      await prefs.setString(_pkType, type);
     }
-    if (_categoryId != null) {
-      await prefs.setString(_pkParentCat, _categoryId!);
+    if (catId != null) {
+      await prefs.setString(_pkCat, catId);
     }
-    if (_accountId != null) {
-      await prefs.setString(_pkAcct, _accountId!);
+    if (parentCatId != null) {
+      await prefs.setString(_pkParentCat, parentCatId);
     }
-    if (_toAccountId != null) {
-      await prefs.setString(_pkToAcct, _toAccountId!);
+    if (acctId != null) {
+      await prefs.setString(_pkAcct, acctId);
+    }
+    if (toAcctId != null) {
+      await prefs.setString(_pkToAcct, toAcctId);
     }
   }
 
@@ -806,13 +814,7 @@ class _RecordScreenState extends ConsumerState<RecordScreen> {
   }
 
   void _showValidationError(String message) {
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(message),
-        behavior: SnackBarBehavior.floating,
-        duration: const Duration(seconds: 2),
-      ),
-    );
+    SnackbarUtils.show(context: context, message: message);
   }
 
   void _pickDate() async {
@@ -1368,7 +1370,7 @@ class _CreateCategoryDialogState extends State<_CreateCategoryDialog> {
           parentId: const Value.absent(),
           icon: const Value('category'),
         ));
-        syncQueue.enqueue(
+        await syncQueue.enqueue(
           operationType: 'insert',
           tableName: 'categories',
           recordId: parentCatId,
@@ -1392,7 +1394,7 @@ class _CreateCategoryDialogState extends State<_CreateCategoryDialog> {
           parentId: Value.absentIfNull(actualParentId),
           icon: const Value('category'),
         ));
-        syncQueue.enqueue(
+        await syncQueue.enqueue(
           operationType: 'insert',
           tableName: 'categories',
           recordId: childCatId,
@@ -1423,9 +1425,7 @@ class _CreateCategoryDialogState extends State<_CreateCategoryDialog> {
   }
 
   void _showSnack(String msg) {
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(msg), behavior: SnackBarBehavior.floating),
-    );
+    SnackbarUtils.show(context: context, message: msg);
   }
 }
 

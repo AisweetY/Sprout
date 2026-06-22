@@ -151,6 +151,9 @@ class RecordDao extends DatabaseAccessor<AppDatabase> with _$RecordDaoMixin {
 
   /// 搜索 + 筛选流水（分页）
   ///
+  /// 当使用关键字搜索但未指定时间范围时，默认限制搜索最近 12 个月，
+  /// 避免 LIKE 全表扫描历史数据。
+  ///
   /// 返回 (records, hasMore)
   Future<({List<Record> records, bool hasMore})> searchRecords({
     DateTime? start,
