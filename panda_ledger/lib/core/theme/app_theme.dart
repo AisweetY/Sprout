@@ -1,4 +1,6 @@
+import 'package:flutter/cupertino.dart' show CupertinoPageTransitionsBuilder;
 import 'package:flutter/material.dart';
+import 'package:google_fonts/google_fonts.dart';
 
 import 'colors.dart';
 
@@ -39,11 +41,25 @@ class AppTheme {
       outlineVariant: colors.divider,
     );
 
+    // C1：Noto Sans SC 字体族。fontFamily 设在 ThemeData 级，所有文字自动继承；
+    // Google Fonts 首次运行从网络下载后缓存到磁盘，之后离线可用。
+    final notoSansSCFamily = GoogleFonts.notoSansSc().fontFamily;
+
     return ThemeData(
       useMaterial3: true,
       brightness: brightness,
       colorScheme: colorScheme,
       scaffoldBackgroundColor: colors.background,
+      fontFamily: notoSansSCFamily,
+
+      // C2：全局页面转场改为 Cupertino 水平滑动（iOS 风格），两平台统一
+      // 替代 Android 默认的垂直淡入，视觉更连贯、更丝滑
+      pageTransitionsTheme: PageTransitionsTheme(
+        builders: {
+          TargetPlatform.android: CupertinoPageTransitionsBuilder(),
+          TargetPlatform.iOS: CupertinoPageTransitionsBuilder(),
+        },
+      ),
 
       // ── AppBar ──
       appBarTheme: AppBarTheme(
@@ -55,24 +71,49 @@ class AppTheme {
       ),
 
       // ── Card ──
+      // elevation: 0.5 + shadowColor 提供轻微深度感，border 用 colors.border（更深）替换
+      // divider 以增强卡片与背景的层级区分
       cardTheme: CardThemeData(
         color: colors.surface,
         surfaceTintColor: Colors.transparent,
-        elevation: 0,
+        elevation: 0.5,
+        shadowColor: Colors.black.withAlpha(18),
         shape: RoundedRectangleBorder(
           borderRadius: BorderRadius.circular(16),
-          side: BorderSide(color: colors.divider, width: 0.5),
+          side: BorderSide(color: colors.border, width: 1.0),
         ),
         margin: EdgeInsets.zero,
       ),
 
       // ── BottomNavigationBar ──
+      // indicatorColor: accentLight（极淡绿）→ accent（实心竹青）提升选中态对比度
+      // 选中图标白色，未选中图标次级灰，选中标签加粗竹青
       navigationBarTheme: NavigationBarThemeData(
         backgroundColor: colors.surface,
-        indicatorColor: colors.accentLight,
+        indicatorColor: colors.accent,
         surfaceTintColor: Colors.transparent,
         labelBehavior: NavigationDestinationLabelBehavior.alwaysShow,
         height: 80,
+        iconTheme: WidgetStateProperty.resolveWith((states) {
+          if (states.contains(WidgetState.selected)) {
+            return const IconThemeData(color: Colors.white, size: 24);
+          }
+          return IconThemeData(color: colors.textSecondary, size: 24);
+        }),
+        labelTextStyle: WidgetStateProperty.resolveWith((states) {
+          if (states.contains(WidgetState.selected)) {
+            return TextStyle(
+              color: colors.accent,
+              fontSize: 12,
+              fontWeight: FontWeight.w600,
+            );
+          }
+          return TextStyle(
+            color: colors.textSecondary,
+            fontSize: 12,
+            fontWeight: FontWeight.w400,
+          );
+        }),
       ),
 
       // ── Text ──
@@ -164,10 +205,21 @@ class AppTheme {
       ),
 
       // ── SnackBar ──
+      // 亮色：深背景+浅文字；暗色：浅背景+深文字（Material 3 inverseSurface 标准）
+      // 原来白底白SnackBar对比度几乎为0，现已修复
       snackBarTheme: SnackBarThemeData(
-        backgroundColor: colors.surface,
-        contentTextStyle: TextStyle(color: colors.textPrimary),
+        backgroundColor: brightness == Brightness.light
+            ? const Color(0xFF2A2D2A)
+            : const Color(0xFFECEDE9),
+        contentTextStyle: TextStyle(
+          color: brightness == Brightness.light
+              ? const Color(0xFFECEDE9)
+              : const Color(0xFF1A1C1A),
+        ),
+        actionTextColor: colors.accent,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        elevation: 4,
+        behavior: SnackBarBehavior.floating,
       ),
     );
   }

@@ -154,8 +154,10 @@ class _BatchRecordScreenState extends ConsumerState<BatchRecordScreen> {
     );
   }
 
-  void _deleteCard(int index) {
+  /// 批量记账列表删除 — 无需 Undo（仅移除本地草稿，未入库），直接返回 true。
+  Future<bool> _deleteCard(int index) async {
     setState(() => _cards.removeAt(index));
+    return true;
   }
 
   void _onReorder(int oldIndex, int newIndex) {

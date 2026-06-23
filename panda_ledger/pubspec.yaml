@@ -12,6 +12,7 @@ dependencies:
 
   # UI
   cupertino_icons: ^1.0.8
+  google_fonts: ^6.2.0   # C1：Noto Sans SC 字体（网络加载 + 磁盘缓存，离线可用）
 
   # 本地数据库 — Drift (SQLite)
   drift: ^2.25.1

@@ -370,6 +370,47 @@ class RecordRepository {
     });
   }
 
+  /// 恢复软删除的记录（Undo 删除 — 恢复余额 + 同步队列）
+  Future<void> restoreRecord(Record record) async {
+    await dao.db.transaction(() async {
+      // 1. 恢复本地记录（deleted → false）
+      await dao.restoreRecord(record.id);
+
+      // 2. 重新应用账户余额变更（与 deleteRecord 中的 _reverseAccountBalance 完全相反）
+      await _updateAccountBalance(
+        accountId: record.accountId,
+        amount: record.amount,
+        type: record.type,
+        toAccountId: record.toAccountId,
+      );
+
+      // 3. 入同步队列（upsert，带 deleted=false）
+      final now = DateTime.now().toUtc();
+      await syncQueue.enqueue(
+        operationType: 'update',
+        tableName: 'records',
+        recordId: record.id,
+        payload: jsonEncode({
+          'id': record.id,
+          'account_id': record.accountId,
+          'to_account_id': record.toAccountId,
+          'amount': record.amount,
+          'type': record.type,
+          'category_id': record.categoryId,
+          'note': record.note,
+          'occurred_at': record.occurredAt.toIso8601String(),
+          'source': record.source,
+          'deleted': false,
+          'updated_at': now.toIso8601String(),
+        }),
+      );
+    });
+
+    syncQueue.processQueue().catchError((e) {
+      debugPrint('🔴 [同步链路] restoreRecord 同步推送失败: $e');
+    });
+  }
+
   /// 撤销某个记账操作对账户余额的影响（与 _updateAccountBalance 完全相反）
   Future<void> _reverseAccountBalance({
     required String accountId,

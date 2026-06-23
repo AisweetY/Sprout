@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/utils/accessibility_utils.dart';
+import '../../core/utils/snackbar_utils.dart';
 import '../../core/widgets/record_card.dart';
 import '../../core/widgets/shimmer_loading.dart';
 import '../../data/local/app_database_provider.dart';
@@ -72,57 +73,90 @@ class _NetSavingCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final isPositive = data.netSaving >= 0;
+    final accentColor = isPositive ? theme.colorScheme.primary : theme.colorScheme.error;
 
+    // B2: 品牌签名卡片 — 竹青微渐变背景，区分于普通白卡片
     return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(20),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text('本月净存款', style: theme.textTheme.bodyMedium),
-            const SizedBox(height: 4),
-            TweenAnimationBuilder<double>(
-              tween: Tween(begin: 0, end: data.netSaving.abs()),
-              duration: AccessibilityUtils.motionDuration(context, const Duration(milliseconds: 600)),
-              curve: Curves.easeOut,
-              builder: (context, value, _) {
-                return Row(
-                  crossAxisAlignment: CrossAxisAlignment.baseline,
-                  textBaseline: TextBaseline.alphabetic,
-                  children: [
-                    Icon(
-                      isPositive ? Icons.trending_up : Icons.trending_down,
-                      size: 28,
-                      color: isPositive ? theme.colorScheme.primary : theme.colorScheme.error,
-                    ),
-                    const SizedBox(width: 4),
-                    Text(
-                      '¥ ${value.toStringAsFixed(2)}',
-                      style: theme.textTheme.displayMedium?.copyWith(
-                        fontWeight: FontWeight.w500,
-                        letterSpacing: -0.5,
-                        color: isPositive ? theme.colorScheme.primary : theme.colorScheme.error,
+      clipBehavior: Clip.antiAlias,
+      child: Container(
+        decoration: BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+            colors: [
+              accentColor.withAlpha(14),
+              Colors.transparent,
+            ],
+          ),
+        ),
+        child: Padding(
+          padding: const EdgeInsets.all(20),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text('本月净存款', style: theme.textTheme.bodyMedium),
+              const SizedBox(height: 4),
+              TweenAnimationBuilder<double>(
+                tween: Tween(begin: 0, end: data.netSaving.abs()),
+                duration: AccessibilityUtils.motionDuration(context, const Duration(milliseconds: 600)),
+                curve: Curves.easeOut,
+                builder: (context, value, _) {
+                  // B1: ¥ 符号缩小 + 数字 w300 letterSpacing -1.5，轻盈感
+                  return Row(
+                    crossAxisAlignment: CrossAxisAlignment.baseline,
+                    textBaseline: TextBaseline.alphabetic,
+                    children: [
+                      Icon(
+                        isPositive ? Icons.trending_up : Icons.trending_down,
+                        size: 24,
+                        color: accentColor,
                       ),
-                    ),
-                  ],
-                );
-              },
-            ),
-            const SizedBox(height: 8),
-            Row(
-              children: [
-                _MiniLabel(
-                  label: '收入 ¥${data.income.toStringAsFixed(0)}',
-                  color: theme.colorScheme.primary,
-                ),
-                const SizedBox(width: 12),
-                _MiniLabel(
-                  label: '支出 ¥${data.expense.toStringAsFixed(0)}',
-                  color: theme.colorScheme.error,
-                ),
-              ],
-            ),
-          ],
+                      const SizedBox(width: 6),
+                      Text.rich(
+                        TextSpan(
+                          children: [
+                            TextSpan(
+                              text: '¥ ',
+                              style: TextStyle(
+                                fontSize: 20,
+                                fontWeight: FontWeight.w300,
+                                color: accentColor,
+                                letterSpacing: 0,
+                                fontFeatures: const [FontFeature.tabularFigures()],
+                              ),
+                            ),
+                            TextSpan(
+                              text: value.toStringAsFixed(2),
+                              style: theme.textTheme.displayMedium?.copyWith(
+                                fontWeight: FontWeight.w300,
+                                letterSpacing: -1.5,
+                                color: accentColor,
+                                fontFeatures: const [FontFeature.tabularFigures()],
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  );
+                },
+              ),
+              const SizedBox(height: 8),
+              Row(
+                children: [
+                  _MiniLabel(
+                    label: '收入 ¥${data.income.toStringAsFixed(0)}',
+                    color: theme.colorScheme.primary,
+                  ),
+                  const SizedBox(width: 12),
+                  _MiniLabel(
+                    label: '支出 ¥${data.expense.toStringAsFixed(0)}',
+                    color: theme.colorScheme.error,
+                  ),
+                ],
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -352,30 +386,41 @@ class _DailyRecordsSection extends ConsumerWidget {
     );
   }
 
-  Future<void> _deleteRecordItem(BuildContext context, WidgetRef ref, RecordItem item) async {
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('删除记录'),
-        content: Text('确定要删除这笔 ¥${item.amount.toStringAsFixed(2)} 的记录吗？'),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('取消')),
-          FilledButton(
-            style: FilledButton.styleFrom(backgroundColor: Theme.of(ctx).colorScheme.error),
-            onPressed: () => Navigator.pop(ctx, true),
-            child: const Text('删除'),
-          ),
-        ],
-      ),
-    );
-    if (confirmed != true) return;
-
+  /// 删除流水 — Undo 模式：直接删除 + SnackBar 撤销，无弹窗确认。
+  /// 返回 true 表示卡片确认滑走，false 表示操作失败卡片弹回。
+  Future<bool> _deleteRecordItem(BuildContext context, WidgetRef ref, RecordItem item) async {
     final recordDao = ref.read(recordDaoProvider);
     final record = await recordDao.getById(item.id);
-    if (record == null) return;
+    if (record == null) return false;
 
-    await ref.read(recordRepositoryProvider).deleteRecord(record);
-    // Provider 自动响应数据变更，无需手动刷新
+    try {
+      await ref.read(recordRepositoryProvider).deleteRecord(record);
+    } catch (e) {
+      if (context.mounted) {
+        SnackbarUtils.showError(context: context, message: '删除失败: $e');
+      }
+      return false;
+    }
+
+    if (!context.mounted) return true;
+
+    // 显示带撤销按钮的 SnackBar（5 秒）
+    SnackbarUtils.showUndo(
+      context: context,
+      message: '已删除 ¥${item.amount.toStringAsFixed(2)}',
+      duration: const Duration(seconds: 5),
+      onUndo: () async {
+        try {
+          await ref.read(recordRepositoryProvider).restoreRecord(record);
+        } catch (e) {
+          if (context.mounted) {
+            SnackbarUtils.showError(context: context, message: '撤销失败: $e');
+          }
+        }
+      },
+    );
+
+    return true; // 卡片滑走
   }
 
 }
@@ -385,7 +430,7 @@ class _DayGroup extends StatelessWidget {
   final DailyRecordGroup group;
   final ThemeData theme;
   final void Function(RecordItem item) onTapItem;
-  final void Function(RecordItem item) onDeleteItem;
+  final Future<bool> Function(RecordItem item) onDeleteItem;
 
   const _DayGroup({
     required this.group,
@@ -399,77 +444,87 @@ class _DayGroup extends StatelessWidget {
     final weekdayNames = ['一', '二', '三', '四', '五', '六', '日'];
     final weekday = weekdayNames[group.date.weekday - 1];
 
+    // C3：去掉外层 Card 包裹（原 Card-in-Card 双重嵌套），
+    // 日期标题改为轻量 label 行，RecordCards 直接呈列，呼吸感更好。
     return Padding(
-      padding: const EdgeInsets.only(bottom: 12),
-      child: Card(
-        margin: EdgeInsets.zero,
-        child: Padding(
-          padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 14),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              // 日期标题行
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  Row(
-                    children: [
-                      Text(
-                        group.dateLabel,
-                        style: theme.textTheme.titleSmall?.copyWith(
-                          fontWeight: FontWeight.w600,
-                        ),
+      padding: const EdgeInsets.only(bottom: 16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // 日期标题行 — 极简 label 风格，不再套 Card
+          Padding(
+            padding: const EdgeInsets.only(bottom: 6, left: 2, right: 2),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Row(
+                  children: [
+                    Text(
+                      group.dateLabel,
+                      style: theme.textTheme.labelMedium?.copyWith(
+                        fontWeight: FontWeight.w700,
+                        color: theme.colorScheme.onSurfaceVariant,
+                        letterSpacing: 0.2,
                       ),
-                      const SizedBox(width: 8),
-                      Text(
+                    ),
+                    const SizedBox(width: 6),
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+                      decoration: BoxDecoration(
+                        color: theme.colorScheme.surfaceContainerHighest,
+                        borderRadius: BorderRadius.circular(4),
+                      ),
+                      child: Text(
                         '周$weekday',
-                        style: theme.textTheme.bodySmall?.copyWith(
+                        style: theme.textTheme.labelSmall?.copyWith(
                           color: theme.colorScheme.outline,
+                          fontSize: 11,
                         ),
                       ),
-                    ],
-                  ),
-                  Row(
-                    children: [
-                      if (group.dayIncome > 0)
-                        Text(
-                          '收 ¥${group.dayIncome.toStringAsFixed(0)} ',
-                          style: TextStyle(
-                            fontSize: 13,
-                            color: theme.colorScheme.primary,
-                          ),
+                    ),
+                  ],
+                ),
+                // 当日收支小计
+                Row(
+                  children: [
+                    if (group.dayIncome > 0)
+                      Text(
+                        '收 ¥${group.dayIncome.toStringAsFixed(0)} ',
+                        style: TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.w500,
+                          color: theme.colorScheme.primary,
                         ),
-                      if (group.dayExpense > 0)
-                        Text(
-                          '支 ¥${group.dayExpense.toStringAsFixed(0)}',
-                          style: TextStyle(
-                            fontSize: 13,
-                            color: theme.colorScheme.error,
-                          ),
+                      ),
+                    if (group.dayExpense > 0)
+                      Text(
+                        '支 ¥${group.dayExpense.toStringAsFixed(0)}',
+                        style: TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.w500,
+                          color: theme.colorScheme.error,
                         ),
-                    ],
-                  ),
-                ],
-              ),
-              const SizedBox(height: 4),
-              const Divider(height: 1),
-              const SizedBox(height: 4),
-              // 当天每一笔 — 使用统一 RecordCard
-              ...group.items.map((item) => RecordCard(
-                    id: item.id,
-                    type: item.type,
-                    amount: item.amount,
-                    categoryName: item.categoryName,
-                    categoryIcon: item.categoryIcon,
-                    accountName: item.accountName,
-                    note: item.note,
-                    syncStatus: item.syncStatus,
-                    onTap: () => onTapItem(item),
-                    onDelete: () => onDeleteItem(item),
-                  )),
-            ],
+                      ),
+                  ],
+                ),
+              ],
+            ),
           ),
-        ),
+
+          // 当天流水卡片 — 直接排列，不再被外层 Card 包裹
+          ...group.items.map((item) => RecordCard(
+                id: item.id,
+                type: item.type,
+                amount: item.amount,
+                categoryName: item.categoryName,
+                categoryIcon: item.categoryIcon,
+                accountName: item.accountName,
+                note: item.note,
+                syncStatus: item.syncStatus,
+                onTap: () => onTapItem(item),
+                onDelete: () => onDeleteItem(item),
+              )),
+        ],
       ),
     );
   }

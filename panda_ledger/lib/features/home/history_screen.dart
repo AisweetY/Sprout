@@ -172,36 +172,38 @@ class _HistoryScreenState extends ConsumerState<HistoryScreen> {
   }
 
   // ═══ 删除 ═══
-  Future<void> _deleteRecord(Record record) async {
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('删除记录'),
-        content: Text('确定要删除这笔 ¥${record.amount.toStringAsFixed(2)} 的记录吗？\n此操作不可恢复。'),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('取消')),
-          FilledButton(
-            style: FilledButton.styleFrom(backgroundColor: Theme.of(ctx).colorScheme.error),
-            onPressed: () => Navigator.pop(ctx, true),
-            child: const Text('删除'),
-          ),
-        ],
-      ),
-    );
-
-    if (confirmed != true) return;
-
+  /// 删除流水 — Undo 模式：直接删除 + SnackBar 撤销，无弹窗确认。
+  /// 返回 true 使 Dismissible 滑走卡片，false 弹回。
+  Future<bool> _deleteRecord(Record record) async {
     try {
       final repo = ref.read(recordRepositoryProvider);
       await repo.deleteRecord(record);
       setState(() => _records.removeWhere((r) => r.id == record.id));
-      if (mounted) {
-        SnackbarUtils.show(context: context, message: '已删除');
-      }
+
+      if (!mounted) return true;
+
+      SnackbarUtils.showUndo(
+        context: context,
+        message: '已删除 ¥${record.amount.toStringAsFixed(2)}',
+        duration: const Duration(seconds: 5),
+        onUndo: () async {
+          try {
+            await repo.restoreRecord(record);
+            if (mounted) setState(() => _records.insert(0, record));
+          } catch (e) {
+            if (mounted) {
+              SnackbarUtils.showError(context: context, message: '撤销失败: $e');
+            }
+          }
+        },
+      );
+
+      return true;
     } catch (e) {
       if (mounted) {
         SnackbarUtils.showError(context: context, message: '删除失败: $e');
       }
+      return false;
     }
   }
 

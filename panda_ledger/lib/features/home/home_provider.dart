@@ -99,7 +99,7 @@ Future<List<DailyRecordGroup>> _getDailyRecords(
        LEFT JOIN categories sub ON r.category_id = sub.id
        LEFT JOIN categories cat ON sub.parent_id = cat.id
        LEFT JOIN accounts a ON r.account_id = a.id
-       WHERE r.occurred_at >= ? AND r.occurred_at < ?
+       WHERE r.occurred_at >= ? AND r.occurred_at < ? AND r.deleted = 0
        ORDER BY r.occurred_at DESC''',
     variables: [
       Variable.withDateTime(start),

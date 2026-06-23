@@ -144,6 +144,17 @@ class RecordDao extends DatabaseAccessor<AppDatabase> with _$RecordDaoMixin {
     );
   }
 
+  /// 恢复软删除的记录（撤销删除）
+  Future<void> restoreRecord(String id) {
+    return (update(db.records)..where((t) => t.id.equals(id))).write(
+      RecordsCompanion(
+        deleted: const Value(false),
+        updatedAt: Value(DateTime.now()),
+        syncStatus: const Value('pending'),
+      ),
+    );
+  }
+
   /// 按 ID 获取单条记录（含已删除，供同步使用）
   Future<Record?> getByIdAny(String id) {
     return (select(db.records)..where((t) => t.id.equals(id))).getSingleOrNull();
