@@ -150,17 +150,11 @@ class AiSummaryNotifier extends StateNotifier<AiSummaryState> {
       state = AiSummaryState(status: AiSummaryStatus.done, text: summary.trim());
     } catch (e) {
       debugPrint('⚠️ AI 小结调用异常: $e');
-      final String errorMsg;
-      if (e is AiMembershipRequiredException ||
-          e.toString().contains('MEMBERSHIP_REQUIRED')) {
-        errorMsg = '请先开通会员以使用 AI 小结';
-      } else if (e is AiAuthExpiredException ||
-          e.toString().contains('401') ||
-          e.toString().contains('身份校验')) {
-        errorMsg = '登录状态已过期，请重新登录';
-      } else {
-        errorMsg = '生成失败，请稍后重试';
-      }
+      // 会员问题暴露给用户；JWT/网络问题对用户透明，统一显示「重试」
+      final errorMsg = (e is AiMembershipRequiredException ||
+              e.toString().contains('MEMBERSHIP_REQUIRED'))
+          ? '请先开通会员以使用 AI 小结'
+          : '生成失败，请稍后重试';
       state = AiSummaryState(status: AiSummaryStatus.error, errorMsg: errorMsg);
     }
   }

@@ -3,6 +3,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'package:supabase_flutter/supabase_flutter.dart';
+
 import '../../core/services/text_recognition/edge_function_ai_service.dart';
 import '../../core/services/text_recognition/models/parsed_transaction.dart';
 import '../../core/services/text_recognition/text_recognition_provider.dart';
@@ -110,17 +112,20 @@ class _BatchRecordScreenState extends ConsumerState<BatchRecordScreen> {
     }
   }
 
-  Future<void> _parse() async {
+  /// [isRetry] = true 时不再递归重试，防止无限循环
+  Future<void> _parse({bool isRetry = false}) async {
     final text = _textCtrl.text.trim();
     if (text.isEmpty) return;
 
-    setState(() {
-      _parsing = true;
-      _errorMsg = null;
-    });
+    if (!isRetry) {
+      setState(() {
+        _parsing = true;
+        _errorMsg = null;
+      });
+    }
 
     try {
-      debugPrint('🔍 [batch] 开始解析: "$text"');
+      debugPrint('🔍 [batch] 开始解析${isRetry ? '(重试)' : ''}: "$text"');
       debugPrint('🔍 [batch] 分类映射 ${_catMap.length} 条, 账户映射 ${_acctMap.length} 条');
 
       final service = ref.read(textRecognitionProvider);
@@ -131,49 +136,47 @@ class _BatchRecordScreenState extends ConsumerState<BatchRecordScreen> {
       );
 
       debugPrint('🔍 [batch] 解析完成, 获得 ${results.length} 条结果');
-      for (var i = 0; i < results.length; i++) {
-        final r = results[i];
-        debugPrint('🔍 [batch]   结果$i: amount=${r.amount}, type=${r.type}, '
-            'catId=${r.categoryId}, subCatId=${r.subcategoryId}, '
-            'subCatName=${r.subcategoryName}, accountId=${r.accountId}, '
-            'accountHint=${r.accountHint}, note=${r.note}, '
-            'occurredAt=${r.occurredAt}, confidence=${r.confidence}');
-      }
 
       if (mounted) {
         setState(() {
           _cards.clear();
           for (final r in results) {
-            _cards.add(_BatchCard(
-              id: IdGenerator.generate(),
-              parsed: r,
-            ));
+            _cards.add(_BatchCard(id: IdGenerator.generate(), parsed: r));
           }
           _parsing = false;
           if (_cards.isEmpty) {
             _errorMsg = '未能识别出有效的收支记录，请尝试更具体的描述（如：中午吃饭35元）';
           } else {
-            _clearDraft(); // 解析成功，清除草稿
+            _clearDraft();
           }
         });
       }
     } catch (e, stack) {
       if (!mounted) return;
 
-      if (e is AiMembershipRequiredException) {
-        // 会员未开通/已过期：刷新会员状态，提示用户
-        ref.read(membershipProvider.notifier).refresh().catchError((_) {});
-        setState(() {
-          _parsing = false;
-          _errorMsg = '请先开通会员以使用 AI 记账';
-        });
+      // ── JWT 过期：对用户透明，静默刷新后重试一次 ──
+      if (e is AiAuthExpiredException && !isRetry) {
+        debugPrint('🔄 [batch] JWT 过期，静默刷新后重试');
+        try {
+          await Supabase.instance.client.auth.refreshSession();
+        } catch (_) {}
+        await _parse(isRetry: true);
         return;
       }
 
-      if (e is AiAuthExpiredException) {
+      // ── 会员校验失败：先刷新会员状态；若确实是会员则重试，否则提示 ──
+      if (e is AiMembershipRequiredException && !isRetry) {
+        debugPrint('🔄 [batch] 会员校验失败，刷新状态后判断');
+        await ref.read(membershipProvider.notifier).refresh();
+        if (ref.read(membershipProvider).isActive) {
+          // 缓存滞后导致的误判，重试即可
+          await _parse(isRetry: true);
+          return;
+        }
+        // 真的没有会员
         setState(() {
           _parsing = false;
-          _errorMsg = '登录状态已过期，请重新登录';
+          _errorMsg = '请先开通会员以使用 AI 记账';
         });
         return;
       }
