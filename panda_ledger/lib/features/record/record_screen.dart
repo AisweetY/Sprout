@@ -509,6 +509,10 @@ class _RecordScreenState extends ConsumerState<RecordScreen> {
       _showValidationError('请选择转出和转入账户');
       return;
     }
+    if (_recordType == 'transfer' && _accountId == _toAccountId) {
+      _showValidationError('转出和转入账户不能相同');
+      return;
+    }
 
     setState(() => _isSubmitting = true);
 

@@ -38,7 +38,16 @@ class _AppShellState extends ConsumerState<AppShell>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    WidgetsBinding.instance.addPostFrameCallback((_) => _initialize());
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _initialize();
+      // 监听登出事件 → 清理用户相关状态
+      ref.listen(authStateProvider, (previous, next) {
+        if (previous == AuthStatus.authenticated &&
+            next == AuthStatus.unauthenticated) {
+          _onSignOut();
+        }
+      });
+    });
   }
 
   @override
@@ -51,15 +60,27 @@ class _AppShellState extends ConsumerState<AppShell>
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
-      // 从后台回到前台 → 立即同步
-      final syncService = ref.read(syncQueueServiceProvider);
-      syncService.pullFromSupabase().catchError((_) {});
-      syncService.processQueue().catchError((_) {});
-      // 刷新会员状态（防止后台期间到期）
-      ref.read(membershipProvider.notifier).refresh().catchError((_) {});
+      _onResumed();
     } else if (state == AppLifecycleState.paused) {
       ref.read(syncQueueServiceProvider).stopPeriodicSync();
     }
+  }
+
+  /// 从后台恢复：pull → process 顺序执行，避免竞态
+  Future<void> _onResumed() async {
+    final syncService = ref.read(syncQueueServiceProvider);
+    try {
+      await syncService.pullFromSupabase();
+      await syncService.processQueue();
+    } catch (_) {}
+    // 会员状态刷新放在同步之后（获取最新过期时间）
+    ref.read(membershipProvider.notifier).refresh().catchError((_) {});
+  }
+
+  /// 登出清理：会员缓存 + sync_queue 待处理项
+  void _onSignOut() {
+    ref.read(membershipProvider.notifier).clear();
+    ref.read(syncQueueServiceProvider).clearQueue().catchError((_) {});
   }
 
   Future<void> _initialize() async {

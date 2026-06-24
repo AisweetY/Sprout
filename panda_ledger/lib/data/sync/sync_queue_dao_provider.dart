@@ -933,4 +933,12 @@ class SyncQueueService {
     _syncTimer?.cancel();
     _syncTimer = null;
   }
+
+  /// 登出时清空队列
+  ///
+  /// 本地模式期间写入的记录 userId='local'，登录后推送会被 RLS 拒绝。
+  /// 登出时彻底清队，避免污染下一个账户的同步流程。
+  Future<void> clearQueue() async {
+    await db.delete(db.syncQueue).go();
+  }
 }

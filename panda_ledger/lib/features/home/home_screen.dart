@@ -301,7 +301,8 @@ class _DailyRecordsSection extends ConsumerWidget {
   void _editRecord(BuildContext context, WidgetRef ref, RecordItem item) async {
     final recordDao = ref.read(recordDaoProvider);
     final record = await recordDao.getById(item.id);
-    if (record == null || !context.mounted) return;
+    // 记录不存在或已被（并发）软删除，直接放弃
+    if (record == null || record.deleted || !context.mounted) return;
     await Navigator.of(context).push(
       MaterialPageRoute(builder: (_) => RecordScreen(editRecord: record)),
     );
