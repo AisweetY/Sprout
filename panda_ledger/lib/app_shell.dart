@@ -5,6 +5,8 @@ import 'data/local/seed_service.dart';
 import 'data/sync/sync_queue_dao_provider.dart';
 import 'features/auth/auth_provider.dart';
 import 'features/home/home_screen.dart';
+import 'features/membership/membership_guard.dart';
+import 'features/membership/membership_provider.dart';
 import 'features/record/record_screen.dart';
 import 'features/record/batch_record_screen.dart';
 import 'features/assets/assets_screen.dart';
@@ -53,6 +55,8 @@ class _AppShellState extends ConsumerState<AppShell>
       final syncService = ref.read(syncQueueServiceProvider);
       syncService.pullFromSupabase().catchError((_) {});
       syncService.processQueue().catchError((_) {});
+      // 刷新会员状态（防止后台期间到期）
+      ref.read(membershipProvider.notifier).refresh().catchError((_) {});
     } else if (state == AppLifecycleState.paused) {
       ref.read(syncQueueServiceProvider).stopPeriodicSync();
     }
@@ -102,6 +106,11 @@ class _AppShellState extends ConsumerState<AppShell>
 
     // 4. 启动后台定时同步
     syncService.startPeriodicSync();
+
+    // 5. 刷新会员状态（异步，不阻塞启动流程）
+    ref.read(membershipProvider.notifier).refresh().catchError((e) {
+      debugPrint('会员状态刷新失败: $e');
+    });
   }
 
   void _onTabChange(int index) {
@@ -114,7 +123,10 @@ class _AppShellState extends ConsumerState<AppShell>
     );
   }
 
-  void _onBatchRecordTap() {
+  Future<void> _onBatchRecordTap() async {
+    // 会员门禁：未会员弹付费墙，有会员直接进入
+    if (!await requireMembership(context, ref)) return;
+    if (!mounted) return;
     Navigator.of(context).push(
       MaterialPageRoute(builder: (_) => const BatchRecordScreen()),
     );

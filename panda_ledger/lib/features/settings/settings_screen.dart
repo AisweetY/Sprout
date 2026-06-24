@@ -18,6 +18,8 @@ import 'export_service.dart';
 import '../../core/services/version_service.dart';
 
 import '../../core/theme/theme_mode_provider.dart';
+import '../membership/membership_center_screen.dart';
+import '../membership/membership_provider.dart';
 import 'reminder_provider.dart';
 
 /// 设置页
@@ -29,6 +31,7 @@ class SettingsScreen extends ConsumerWidget {
     final email = ref.watch(currentUserProvider);
     final isLoggedIn = email != null;
     final reminder = ref.watch(reminderProvider);
+    final membership = ref.watch(membershipProvider);
 
     return Scaffold(
       appBar: AppBar(
@@ -67,6 +70,63 @@ class SettingsScreen extends ConsumerWidget {
               trailing: const Icon(Icons.chevron_right),
               onTap: () => _loginForSync(context, ref),
             ),
+          // ── 会员中心入口 ──
+          ListTile(
+            leading: CircleAvatar(
+              backgroundColor: membership.isActive
+                  ? Theme.of(context).colorScheme.primary.withAlpha(25)
+                  : Theme.of(context).colorScheme.surfaceContainerHighest,
+              child: Icon(
+                Icons.workspace_premium_rounded,
+                color: membership.isActive
+                    ? Theme.of(context).colorScheme.primary
+                    : Theme.of(context).colorScheme.onSurfaceVariant,
+              ),
+            ),
+            title: const Text('会员中心'),
+            subtitle: Text(
+              membership.isActive
+                  ? '${membership.info!.planLabel} · ${membership.info!.expiryLabel}'
+                  : '开通会员解锁 AI 记账与 AI 小结',
+            ),
+            trailing: membership.isActive
+                ? Container(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 10, vertical: 4),
+                    decoration: BoxDecoration(
+                      color: Theme.of(context)
+                          .colorScheme
+                          .primaryContainer,
+                      borderRadius: BorderRadius.circular(20),
+                    ),
+                    child: Text(
+                      '生效中',
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                        color: Theme.of(context).colorScheme.primary,
+                      ),
+                    ),
+                  )
+                : FilledButton.tonal(
+                    onPressed: () => Navigator.of(context).push(
+                      MaterialPageRoute(
+                          builder: (_) => const MembershipCenterScreen()),
+                    ),
+                    style: FilledButton.styleFrom(
+                      visualDensity: VisualDensity.compact,
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 12, vertical: 0),
+                      shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(20)),
+                    ),
+                    child: const Text('开通'),
+                  ),
+            onTap: () => Navigator.of(context).push(
+              MaterialPageRoute(
+                  builder: (_) => const MembershipCenterScreen()),
+            ),
+          ),
           const Divider(),
 
           // ── 数据管理 ──

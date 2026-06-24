@@ -232,7 +232,23 @@ serve(async (req: Request): Promise<Response> => {
       return jsonResponse({ error: "身份校验失败，请重新登录" }, 401);
     }
 
-    // ── 2. 解析请求参数 ──
+    // ── 2. 会员校验（服务端强校验，防止客户端门禁被绕过）──
+    const { data: membership } = await supabase
+      .from("memberships")
+      .select("status, expires_at")
+      .eq("user_id", user.id)
+      .maybeSingle();
+
+    const membershipActive =
+      membership?.status === "active" &&
+      (membership.expires_at === null ||
+        new Date(membership.expires_at) > new Date());
+
+    if (!membershipActive) {
+      return jsonResponse({ error: "MEMBERSHIP_REQUIRED" }, 402);
+    }
+
+    // ── 3. 解析请求参数 ──
     const body: RequestBody = await req.json().catch(() => ({} as RequestBody));
     const { mode, input_text, today: clientToday } = body;
 
@@ -260,7 +276,7 @@ serve(async (req: Request): Promise<Response> => {
       );
     }
 
-    // ── 3. 查询生效的 AI 提供商配置 ──
+    // ── 4. 查询生效的 AI 提供商配置 ──
     const { data: config, error: configError } = await supabase
       .from("ai_provider_configs")
       .select("*")
@@ -276,7 +292,7 @@ serve(async (req: Request): Promise<Response> => {
 
     const provider = config as ProviderConfig;
 
-    // ── 4. 从 Secrets 取 API Key ──
+    // ── 5. 从 Secrets 取 API Key ──
     const apiKey = Deno.env.get(provider.api_key_secret_name);
     if (!apiKey) {
       return jsonResponse(
@@ -287,7 +303,7 @@ serve(async (req: Request): Promise<Response> => {
       );
     }
 
-    // ── 5. 查询用户的账户和分类（RLS 自动限制为当前用户数据）──
+    // ── 6. 查询用户的账户和分类（RLS 自动限制为当前用户数据）──
     const [{ data: accounts }, { data: categories }] = await Promise.all([
       supabase.from("accounts").select("id, name").eq("deleted", false),
       supabase.from("categories").select("id, name, parent_id").eq("deleted", false),
@@ -302,7 +318,7 @@ serve(async (req: Request): Promise<Response> => {
       acctMap[a.name] = a.id;
     }
 
-    // ── 6. 组装 prompt ──
+    // ── 7. 组装 prompt ──
     const catList = Object.entries(catMap)
       .map(([name, id]) => `- ${name} (id: ${id})`)
       .join("\n");
@@ -318,7 +334,7 @@ serve(async (req: Request): Promise<Response> => {
         ? batchSystemPrompt(catList, acctList, today)
         : singleSystemPrompt(catList, acctList, today);
 
-    // ── 7. 调用 AI 服务 ──
+    // ── 8. 调用 AI 服务 ──
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 25_000); // 25s 超时
 
@@ -387,7 +403,7 @@ serve(async (req: Request): Promise<Response> => {
       );
     }
 
-    // ── 8. 解析 AI 返回内容 ──
+    // ── 9. 解析 AI 返回内容 ──
     let parsed: unknown;
     try {
       parsed = JSON.parse(content);
@@ -401,7 +417,7 @@ serve(async (req: Request): Promise<Response> => {
       );
     }
 
-    // ── 9. 校验并清理返回值（单笔模式）──
+    // ── 10. 校验并清理返回值（单笔模式）──
     if (mode === "single") {
       const validated = validateSingleResult(parsed);
       return jsonResponse({ data: validated });

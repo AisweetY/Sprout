@@ -211,13 +211,29 @@ serve(async (req: Request): Promise<Response> => {
       return jsonResponse({ error: "身份校验失败" }, 401);
     }
 
-    // ── 2. 解析请求 ──
+    // ── 2. 会员校验（服务端强校验，防止客户端门禁被绕过）──
+    const { data: membership } = await supabase
+      .from("memberships")
+      .select("status, expires_at")
+      .eq("user_id", user.id)
+      .maybeSingle();
+
+    const membershipActive =
+      membership?.status === "active" &&
+      (membership.expires_at === null ||
+        new Date(membership.expires_at) > new Date());
+
+    if (!membershipActive) {
+      return jsonResponse({ error: "MEMBERSHIP_REQUIRED" }, 402);
+    }
+
+    // ── 3. 解析请求 ──
     const body: SummaryRequest = await req.json().catch(() => null);
     if (!body || body.dimension_name == null) {
       return jsonResponse({ error: "缺少必填参数" }, 400);
     }
 
-    // ── 3. 读配置表 ──
+    // ── 4. 读配置表 ──
     const { data: config, error: configError } = await supabase
       .from("ai_provider_configs")
       .select("*")
@@ -230,7 +246,7 @@ serve(async (req: Request): Promise<Response> => {
 
     const provider = config as ProviderConfig;
 
-    // ── 4. 取 API Key ──
+    // ── 5. 取 API Key ──
     const apiKey = Deno.env.get(provider.api_key_secret_name);
     if (!apiKey) {
       return jsonResponse(
@@ -239,7 +255,7 @@ serve(async (req: Request): Promise<Response> => {
       );
     }
 
-    // ── 5. 组装 prompt & 调 AI ──
+    // ── 6. 组装 prompt & 调 AI ──
     const prompt = buildPrompt(body);
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 25_000);
@@ -291,7 +307,7 @@ serve(async (req: Request): Promise<Response> => {
       return jsonResponse({ error: "AI 服务返回了空内容" }, 502);
     }
 
-    // ── 6. 返回小结 ──
+    // ── 7. 返回小结 ──
     return jsonResponse({ summary: content.trim() });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

@@ -5,6 +5,7 @@ import '../../core/theme/colors.dart';
 import '../../core/utils/accessibility_utils.dart';
 import '../../core/widgets/error_state_widget.dart';
 import '../../core/widgets/shimmer_loading.dart';
+import '../membership/membership_guard.dart';
 import 'ai_summary_provider.dart';
 import 'insights_provider.dart';
 
@@ -592,7 +593,7 @@ class _ConclusionCard extends ConsumerWidget {
           child: FilledButton.icon(
             icon: const Icon(Icons.auto_awesome, size: 18),
             label: const Text('生成小结'),
-            onPressed: () => _onGenerate(ref, data),
+            onPressed: () => _onGenerate(context, ref, data),
           ),
         ),
       ],
@@ -687,15 +688,16 @@ class _ConclusionCard extends ConsumerWidget {
           child: OutlinedButton.icon(
             icon: const Icon(Icons.refresh, size: 16),
             label: const Text('重试'),
-            onPressed: () => _onGenerate(ref, data),
+            onPressed: () => _onGenerate(context, ref, data),
           ),
         ),
       ],
     );
   }
 
-  /// 点击「生成小结」→ 准备数据 → 调 Edge Function
-  void _onGenerate(WidgetRef ref, InsightsData data) {
+  /// 点击「生成小结」→ 会员门禁 → 准备数据 → 调 Edge Function
+  Future<void> _onGenerate(BuildContext context, WidgetRef ref, InsightsData data) async {
+    if (!await requireMembership(context, ref)) return;
     _triggerGenerate(ref, data, force: false);
   }
 
