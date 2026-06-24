@@ -337,6 +337,9 @@ Future<void> _loginForSync(BuildContext context, WidgetRef ref) async {
   ref.invalidate(assetsDataProvider);
   ref.invalidate(insightsDataProvider);
 
+  // 登录后立即刷新会员状态（不等 app_shell 的下次 resume）
+  ref.read(membershipProvider.notifier).refresh().catchError((_) {});
+
   if (context.mounted) {
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(

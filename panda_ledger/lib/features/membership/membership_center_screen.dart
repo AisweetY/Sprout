@@ -7,11 +7,26 @@ import 'membership_models.dart';
 import 'membership_provider.dart';
 
 /// 会员中心页
-class MembershipCenterScreen extends ConsumerWidget {
+class MembershipCenterScreen extends ConsumerStatefulWidget {
   const MembershipCenterScreen({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<MembershipCenterScreen> createState() =>
+      _MembershipCenterScreenState();
+}
+
+class _MembershipCenterScreenState extends ConsumerState<MembershipCenterScreen> {
+  @override
+  void initState() {
+    super.initState();
+    // 进页面时立即拉取最新会员状态，确保数据不来自过期缓存
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      ref.read(membershipProvider.notifier).refresh();
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final state = ref.watch(membershipProvider);
     final skusAsync = ref.watch(membershipSkusProvider);
     final theme = Theme.of(context);
@@ -20,7 +35,7 @@ class MembershipCenterScreen extends ConsumerWidget {
       appBar: AppBar(
         title: const Text('会员中心'),
         actions: [
-          // 刷新按钮（调试 / 手动重新加载）
+          // 刷新按钮（手动重新加载）
           IconButton(
             icon: const Icon(Icons.refresh_rounded),
             tooltip: '刷新状态',
@@ -664,18 +679,17 @@ class _RedeemSheetState extends State<_RedeemSheet> {
         return;
       }
 
-      // 成功
+      // 成功：先拿引用，再 pop（pop 后 context.mounted = false，但 messenger 仍有效）
+      final messenger = ScaffoldMessenger.of(context);
       if (mounted) Navigator.of(context).pop();
       widget.onSuccess();
 
-      if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('🎉 兑换成功，已开通会员！'),
-            behavior: SnackBarBehavior.floating,
-          ),
-        );
-      }
+      messenger.showSnackBar(
+        const SnackBar(
+          content: Text('🎉 兑换成功，已开通会员！'),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
     } catch (e) {
       if (mounted) {
         setState(() {
