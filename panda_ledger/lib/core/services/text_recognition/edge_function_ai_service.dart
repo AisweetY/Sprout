@@ -29,6 +29,28 @@ class EdgeFunctionAiService implements IAiParsingService {
     this.timeout = const Duration(seconds: 30),
   });
 
+  /// 确保 JWT 未过期，快到期时主动刷新
+  ///
+  /// 应用从后台恢复时 JWT 可能已过期但 supabase_flutter 刷新还未完成，
+  /// 在发起 Edge Function 调用之前主动刷新，避免 401 被当成「识别失败」静默丢弃。
+  Future<void> _ensureFreshSession() async {
+    final session = Supabase.instance.client.auth.currentSession;
+    if (session == null) return;
+    final expiresAtSecs = session.expiresAt;
+    if (expiresAtSecs == null) return;
+    // expiresAt 是 Unix 秒时间戳
+    final expiresAt =
+        DateTime.fromMillisecondsSinceEpoch(expiresAtSecs * 1000);
+    // 距离过期不足 60 秒则主动刷新
+    if (expiresAt.isBefore(DateTime.now().add(const Duration(seconds: 60)))) {
+      try {
+        await Supabase.instance.client.auth.refreshSession();
+      } catch (_) {
+        // 刷新失败不阻断——让后续调用正常失败并抛出，由上层处理
+      }
+    }
+  }
+
   /// 将 DateTime 格式化为 YYYY-MM-DD 字符串（本地时区）
   String _todayString() {
     final now = DateTime.now();
@@ -49,25 +71,26 @@ class EdgeFunctionAiService implements IAiParsingService {
     }
 
     try {
+      await _ensureFreshSession();
+
       final response = await Supabase.instance.client.functions
           .invoke(
             _functionName,
             body: {
               'mode': 'single',
               'input_text': userInput.trim(),
-              'today': _todayString(), // 传入本地今日日期，用于 AI 换算相对时间词
+              'today': _todayString(),
             },
           )
           .timeout(timeout);
 
-      // response.data 是 Edge Function 返回的 JSON body
       final body = _decodeResponse(response.data);
       if (body == null) {
         return ParsedTransaction.empty(userInput);
       }
 
-      // 检查是否返回了错误
       if (body['error'] != null) {
+        _throwIfAuthOrMembership(body['error'].toString());
         debugPrint('⚠️ Edge Function 返回错误: ${body['error']}');
         return ParsedTransaction.empty(userInput);
       }
@@ -79,6 +102,7 @@ class EdgeFunctionAiService implements IAiParsingService {
 
       return _parseSingleResult(data, userInput);
     } catch (e) {
+      _rethrowIfAuthOrMembership(e);
       debugPrint('⚠️ Edge Function 调用失败: $e');
       return ParsedTransaction.empty(userInput);
     }
@@ -93,13 +117,15 @@ class EdgeFunctionAiService implements IAiParsingService {
     if (userInput.trim().isEmpty) return [];
 
     try {
+      await _ensureFreshSession();
+
       final response = await Supabase.instance.client.functions
           .invoke(
             _functionName,
             body: {
               'mode': 'batch',
               'input_text': userInput.trim(),
-              'today': _todayString(), // 传入本地今日日期，用于 AI 换算相对时间词
+              'today': _todayString(),
             },
           )
           .timeout(timeout);
@@ -108,6 +134,7 @@ class EdgeFunctionAiService implements IAiParsingService {
       if (body == null) return [];
 
       if (body['error'] != null) {
+        _throwIfAuthOrMembership(body['error'].toString());
         debugPrint('⚠️ Edge Function 返回错误: ${body['error']}');
         return [];
       }
@@ -120,8 +147,36 @@ class EdgeFunctionAiService implements IAiParsingService {
           .where((p) => p.hasPartialResult)
           .toList();
     } catch (e) {
+      _rethrowIfAuthOrMembership(e);
       debugPrint('⚠️ Edge Function 批量调用失败: $e');
       return [];
+    }
+  }
+
+  /// body['error'] 包含 401/402 语义时向上抛，其余静默降级
+  void _throwIfAuthOrMembership(String error) {
+    if (error == 'MEMBERSHIP_REQUIRED') {
+      throw const AiMembershipRequiredException();
+    }
+    if (error.contains('登录') || error.contains('身份校验') ||
+        error.contains('UNAUTHORIZED')) {
+      throw AiAuthExpiredException(error);
+    }
+  }
+
+  /// catch 到的异常中：已经是我们的语义异常则直接 rethrow
+  void _rethrowIfAuthOrMembership(Object e) {
+    if (e is AiMembershipRequiredException || e is AiAuthExpiredException) {
+      throw e;
+    }
+    // supabase_flutter 部分版本对 402 抛 FunctionsException
+    final msg = e.toString().toLowerCase();
+    if (msg.contains('membership_required')) {
+      throw const AiMembershipRequiredException();
+    }
+    if (msg.contains('401') || msg.contains('unauthorized') ||
+        msg.contains('身份校验')) {
+      throw AiAuthExpiredException(e.toString());
     }
   }
 
@@ -148,6 +203,7 @@ class EdgeFunctionAiService implements IAiParsingService {
   }
 
   /// 解析单条 AI 结果
+
   ParsedTransaction _parseSingleResult(
     Map<String, dynamic>? json,
     String userInput,
@@ -184,4 +240,23 @@ class EdgeFunctionAiService implements IAiParsingService {
       rawInput: userInput,
     );
   }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// AI 语义异常（供上层区分错误类型，给出有针对性的提示）
+// ─────────────────────────────────────────────────────────────────────
+
+/// 会员未开通或已过期：需要引导用户进入会员中心
+class AiMembershipRequiredException implements Exception {
+  const AiMembershipRequiredException();
+  @override
+  String toString() => 'AI 功能需要开通会员';
+}
+
+/// JWT 已过期 / 未认证：需要重新登录
+class AiAuthExpiredException implements Exception {
+  final String detail;
+  const AiAuthExpiredException(this.detail);
+  @override
+  String toString() => '登录状态已过期，请重新登录';
 }

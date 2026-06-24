@@ -3,8 +3,10 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../../core/services/text_recognition/edge_function_ai_service.dart';
 import '../../core/services/text_recognition/models/parsed_transaction.dart';
 import '../../core/services/text_recognition/text_recognition_provider.dart';
+import '../membership/membership_provider.dart';
 import '../../core/utils/id_generator.dart';
 import '../../core/widgets/record_card.dart';
 import '../../data/local/app_database_provider.dart';
@@ -156,13 +158,31 @@ class _BatchRecordScreenState extends ConsumerState<BatchRecordScreen> {
         });
       }
     } catch (e, stack) {
-      debugPrint('🔴 [batch] 解析异常: $e\n$stack');
-      if (mounted) {
+      if (!mounted) return;
+
+      if (e is AiMembershipRequiredException) {
+        // 会员未开通/已过期：刷新会员状态，提示用户
+        ref.read(membershipProvider.notifier).refresh().catchError((_) {});
         setState(() {
           _parsing = false;
-          _errorMsg = '解析失败: $e';
+          _errorMsg = '请先开通会员以使用 AI 记账';
         });
+        return;
       }
+
+      if (e is AiAuthExpiredException) {
+        setState(() {
+          _parsing = false;
+          _errorMsg = '登录状态已过期，请重新登录';
+        });
+        return;
+      }
+
+      debugPrint('🔴 [batch] 解析异常: $e\n$stack');
+      setState(() {
+        _parsing = false;
+        _errorMsg = '识别失败，请稍后重试';
+      });
     }
   }
 
