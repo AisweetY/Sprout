@@ -83,6 +83,7 @@ class _InsightsScreenState extends ConsumerState<InsightsScreen> {
           // ── 内容区 ──
           Expanded(
             child: asyncData.when(
+              skipLoadingOnReload: true,   // 重新加载时保留旧数据，不闪骨架屏
               loading: () => PageSkeletons.insights(),
               error: (e, _) => ErrorStateWidget(
                 message: ErrorStateWidget.friendlyMessage(e),

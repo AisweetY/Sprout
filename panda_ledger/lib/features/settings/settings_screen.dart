@@ -322,33 +322,34 @@ Future<void> _loginForSync(BuildContext context, WidgetRef ref) async {
 
   await ref.read(localModeProvider.notifier).disable();
 
-  final sync = ref.read(syncQueueServiceProvider);
-  // 先推送本地堆积变更到云端，再拉取云端已有数据
-  try {
-    await sync.processQueue();
-    await sync.pullFromSupabase();
-    await sync.processQueue();
-  } catch (_) {
-    // 同步失败不阻塞，后台定时同步会继续重试
-  }
-
-  // 刷新页面数据
-  ref.invalidate(homeDataProvider);
-  ref.invalidate(assetsDataProvider);
-  ref.invalidate(insightsDataProvider);
-
-  // 登录后立即刷新会员状态（不等 app_shell 的下次 resume）
+  // 会员状态立即刷新（不阻塞）
   ref.read(membershipProvider.notifier).refresh().catchError((_) {});
 
+  // 立即告知用户已登录，不等同步完成
   if (context.mounted) {
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(
-        content: Text('已开启云同步，本地数据正在上传'),
+        content: Text('已登录，数据同步中…'),
         behavior: SnackBarBehavior.floating,
         duration: Duration(seconds: 2),
       ),
     );
   }
+
+  // 同步放后台：不阻塞 UI，完成后刷新各页面数据
+  // 因为三个页面均已加 skipLoadingOnReload，刷新时保留旧数据不闪屏
+  final sync = ref.read(syncQueueServiceProvider);
+  sync.processQueue()
+      .then((_) => sync.pullFromSupabase())
+      .then((_) => sync.processQueue())
+      .then((_) {
+        ref.invalidate(homeDataProvider);
+        ref.invalidate(assetsDataProvider);
+        ref.invalidate(insightsDataProvider);
+      })
+      .catchError((_) {
+        // 同步失败不阻塞，后台定时同步会继续重试
+      });
 }
 
 /// 弹出清空数据二次确认对话框（要求勾选"我已导出备份"）

@@ -40,6 +40,7 @@ class HomeScreen extends ConsumerWidget {
         ],
       ),
       body: asyncData.when(
+        skipLoadingOnReload: true,   // 重新加载时保留旧数据，不闪骨架屏
         loading: () => PageSkeletons.home(),
         error: (e, _) => ErrorStateWidget(
           message: ErrorStateWidget.friendlyMessage(e),

@@ -61,6 +61,7 @@ class _AssetsScreenState extends ConsumerState<AssetsScreen> {
           // ── 内容区 ──
           Expanded(
             child: asyncData.when(
+              skipLoadingOnReload: true,   // 重新加载时保留旧数据，不闪骨架屏
               loading: () => PageSkeletons.assets(),
               error: (e, _) => ErrorStateWidget(
                 message: ErrorStateWidget.friendlyMessage(e),
