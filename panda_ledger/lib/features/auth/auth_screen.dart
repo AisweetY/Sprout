@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'auth_provider.dart';
+import 'local_mode_provider.dart';
 
 /// 认证页面
 ///
@@ -44,6 +45,10 @@ class _AuthScreenState extends ConsumerState<AuthScreen> {
               email: _emailController.text.trim(),
               password: _passwordController.text,
             );
+      }
+      // 登录成功：若作为模态路由打开（从本地模式进入），自行 pop 交回调用方处理同步
+      if (mounted && Navigator.of(context).canPop()) {
+        Navigator.of(context).pop(true);
       }
     } catch (e) {
       if (mounted) {
@@ -240,6 +245,24 @@ class _AuthScreenState extends ConsumerState<AuthScreen> {
                             },
                       child: const Text('忘记密码？'),
                     ),
+
+                  // 本地优先入口：冷启动（非模态）时展示，允许不登录直接记账
+                  if (!Navigator.of(context).canPop()) ...[
+                    const SizedBox(height: 8),
+                    TextButton.icon(
+                      icon: const Icon(Icons.bolt_outlined, size: 18),
+                      label: const Text('先在本地记账，稍后登录'),
+                      onPressed: _isLoading
+                          ? null
+                          : () => ref.read(localModeProvider.notifier).enable(),
+                    ),
+                    Text(
+                      '本地数据随时可登录后同步到云端',
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: theme.colorScheme.onSurfaceVariant,
+                      ),
+                    ),
+                  ],
                 ],
               ),
             ),

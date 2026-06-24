@@ -4,7 +4,10 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../../data/local/app_database_provider.dart';
 import '../../data/local/seed_service.dart';
+import '../../data/sync/sync_queue_dao_provider.dart';
 import '../auth/auth_provider.dart';
+import '../auth/auth_screen.dart';
+import '../auth/local_mode_provider.dart';
 import '../home/home_provider.dart';
 import '../insights/insights_provider.dart';
 import '../assets/assets_provider.dart';
@@ -12,6 +15,10 @@ import 'account_manage_screen.dart';
 import 'budget_settings_screen.dart';
 import 'category_manage_screen.dart';
 import 'export_service.dart';
+import '../../core/services/version_service.dart';
+
+import '../../core/theme/theme_mode_provider.dart';
+import 'reminder_provider.dart';
 
 /// 设置页
 class SettingsScreen extends ConsumerWidget {
@@ -20,6 +27,8 @@ class SettingsScreen extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final email = ref.watch(currentUserProvider);
+    final isLoggedIn = email != null;
+    final reminder = ref.watch(reminderProvider);
 
     return Scaffold(
       appBar: AppBar(
@@ -30,18 +39,34 @@ class SettingsScreen extends ConsumerWidget {
         children: [
           // ── 账户信息 ──
           _SectionHeader(title: '账户'),
-          ListTile(
-            leading: CircleAvatar(
-              backgroundColor: Theme.of(context).colorScheme.primary.withAlpha(25),
-              child: Icon(Icons.savings, color: Theme.of(context).colorScheme.primary),
+          if (isLoggedIn)
+            ListTile(
+              leading: CircleAvatar(
+                backgroundColor:
+                    Theme.of(context).colorScheme.primary.withAlpha(25),
+                child: Icon(Icons.cloud_done_outlined,
+                    color: Theme.of(context).colorScheme.primary),
+              ),
+              title: Text(email),
+              subtitle: const Text('已开启云同步'),
+              trailing: TextButton(
+                onPressed: () => ref.read(authStateProvider.notifier).signOut(),
+                child: const Text('登出'),
+              ),
+            )
+          else
+            ListTile(
+              leading: CircleAvatar(
+                backgroundColor:
+                    Theme.of(context).colorScheme.primary.withAlpha(25),
+                child: Icon(Icons.cloud_off_outlined,
+                    color: Theme.of(context).colorScheme.onSurfaceVariant),
+              ),
+              title: const Text('本地模式'),
+              subtitle: const Text('数据仅保存在本机，点击登录以云端备份'),
+              trailing: const Icon(Icons.chevron_right),
+              onTap: () => _loginForSync(context, ref),
             ),
-            title: Text(email ?? '未登录'),
-            subtitle: const Text('邮箱登录'),
-            trailing: TextButton(
-              onPressed: () => ref.read(authStateProvider.notifier).signOut(),
-              child: const Text('登出'),
-            ),
-          ),
           const Divider(),
 
           // ── 数据管理 ──
@@ -114,6 +139,61 @@ class SettingsScreen extends ConsumerWidget {
           ),
           const Divider(),
 
+          // ── 提醒 ──
+          _SectionHeader(title: '提醒'),
+          SwitchListTile(
+            secondary: const Icon(Icons.notifications_active_outlined),
+            title: const Text('每日记账提醒'),
+            subtitle: Text(reminder.enabled
+                ? '每天 ${reminder.timeLabel} 提醒记账'
+                : '开启后每天定时提醒记账'),
+            value: reminder.enabled,
+            onChanged: (v) async {
+              final ok = await ref.read(reminderProvider.notifier).setEnabled(v);
+              if (!ok && context.mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(
+                    content: Text('通知权限被拒绝，请在系统设置中开启'),
+                    behavior: SnackBarBehavior.floating,
+                  ),
+                );
+              }
+            },
+          ),
+          if (reminder.enabled)
+            ListTile(
+              leading: const Icon(Icons.schedule_outlined),
+              title: const Text('提醒时间'),
+              trailing: Text(
+                reminder.timeLabel,
+                style: Theme.of(context).textTheme.titleMedium,
+              ),
+              onTap: () async {
+                final picked = await showTimePicker(
+                  context: context,
+                  initialTime: reminder.timeOfDay,
+                  helpText: '选择每日提醒时间',
+                );
+                if (picked != null) {
+                  await ref
+                      .read(reminderProvider.notifier)
+                      .setTime(picked.hour, picked.minute);
+                }
+              },
+            ),
+          const Divider(),
+
+          // ── 外观 ──
+          _SectionHeader(title: '外观'),
+          ListTile(
+            leading: const Icon(Icons.dark_mode_outlined),
+            title: const Text('主题模式'),
+            subtitle: Text(ref.watch(themeModeLabelProvider)),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: () => ref.read(themeModeProvider.notifier).cycle(),
+          ),
+          const Divider(),
+
           // ── 清空数据 ──
           _SectionHeader(title: '危险操作'),
           ListTile(
@@ -126,10 +206,41 @@ class SettingsScreen extends ConsumerWidget {
 
           // ── 关于 ──
           _SectionHeader(title: '关于'),
-          const ListTile(
-            leading: Icon(Icons.info_outline),
-            title: Text('版本'),
-            trailing: Text('1.0.0'),
+          ListTile(
+            leading: const Icon(Icons.info_outline),
+            title: const Text('版本'),
+            trailing: ref.watch(appVersionProvider).when(
+                  data: (v) => Text(v),
+                  loading: () => const Text('…'),
+                  error: (_, _) => const Text('1.0.0'),
+                ),
+          ),
+          ListTile(
+            leading: const Icon(Icons.privacy_tip_outlined),
+            title: const Text('隐私政策'),
+            trailing: const Icon(Icons.open_in_new, size: 16),
+            onTap: () {
+              // 本地记账应用：数据仅存本机。登录后同步到用户私有的 Supabase 实例。
+              showDialog(
+                context: context,
+                builder: (ctx) => AlertDialog(
+                  title: const Text('隐私政策'),
+                  content: const Text(
+                    '熊猫记账采用本地优先架构：\n\n'
+                    '• 所有数据默认保存在您的设备本地\n'
+                    '• 仅当您主动登录后，数据才会加密同步至您私有的云端存储\n'
+                    '• 我们不会收集、上传或分享您的任何财务数据\n'
+                    '• 您可以随时导出所有数据（CSV / JSON）或清空全部数据',
+                  ),
+                  actions: [
+                    FilledButton(
+                      onPressed: () => Navigator.of(ctx).pop(),
+                      child: const Text('关闭'),
+                    ),
+                  ],
+                ),
+              );
+            },
           ),
         ],
       ),
@@ -137,29 +248,88 @@ class SettingsScreen extends ConsumerWidget {
   }
 }
 
-/// 弹出清空数据二次确认对话框
+/// 本地模式下登录以开启云同步
+///
+/// 流程：push AuthScreen 登录 → 关闭本地模式 → flush 本地堆积的 sync_queue
+/// → 拉取云端数据合并。本地期间所有写入已入队，登录后自动推送至新账户。
+Future<void> _loginForSync(BuildContext context, WidgetRef ref) async {
+  await Navigator.of(context).push(
+    MaterialPageRoute(builder: (_) => const AuthScreen()),
+  );
+
+  // 返回后确认是否登录成功
+  if (ref.read(authStateProvider) != AuthStatus.authenticated) return;
+
+  await ref.read(localModeProvider.notifier).disable();
+
+  final sync = ref.read(syncQueueServiceProvider);
+  // 先推送本地堆积变更到云端，再拉取云端已有数据
+  try {
+    await sync.processQueue();
+    await sync.pullFromSupabase();
+    await sync.processQueue();
+  } catch (_) {
+    // 同步失败不阻塞，后台定时同步会继续重试
+  }
+
+  // 刷新页面数据
+  ref.invalidate(homeDataProvider);
+  ref.invalidate(assetsDataProvider);
+  ref.invalidate(insightsDataProvider);
+
+  if (context.mounted) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('已开启云同步，本地数据正在上传'),
+        behavior: SnackBarBehavior.floating,
+        duration: Duration(seconds: 2),
+      ),
+    );
+  }
+}
+
+/// 弹出清空数据二次确认对话框（要求勾选"我已导出备份"）
 Future<void> _showClearDataDialog(BuildContext context, WidgetRef ref) async {
+  bool backedUp = false;
   final confirmed = await showDialog<bool>(
     context: context,
-    builder: (ctx) => AlertDialog(
-      title: const Text('清空所有数据'),
-      content: const Text(
-        '此操作将清空所有账单、账户、分类、预算数据，'
-        '并同步删除云端备份。\n\n此操作不可恢复，确认清空？',
-      ),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.of(ctx).pop(false),
-          child: const Text('取消'),
+    builder: (ctx) => StatefulBuilder(
+      builder: (ctx, setDialogState) => AlertDialog(
+        title: const Text('清空所有数据'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              '此操作将清空所有账单、账户、分类、预算数据，'
+              '并同步删除云端备份。\n\n此操作不可恢复。',
+            ),
+            const SizedBox(height: 16),
+            CheckboxListTile(
+              value: backedUp,
+              onChanged: (v) => setDialogState(() => backedUp = v ?? false),
+              title: const Text('我已导出数据备份'),
+              subtitle: const Text('导出 CSV / JSON 后再清空更安全'),
+              controlAffinity: ListTileControlAffinity.leading,
+              contentPadding: EdgeInsets.zero,
+            ),
+          ],
         ),
-        FilledButton(
-          style: FilledButton.styleFrom(
-            backgroundColor: Theme.of(ctx).colorScheme.error,
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('取消'),
           ),
-          onPressed: () => Navigator.of(ctx).pop(true),
-          child: const Text('确认清空'),
-        ),
-      ],
+          FilledButton(
+            style: FilledButton.styleFrom(
+              backgroundColor:
+                  backedUp ? Theme.of(ctx).colorScheme.error : null,
+            ),
+            onPressed: backedUp ? () => Navigator.of(ctx).pop(true) : null,
+            child: const Text('确认清空'),
+          ),
+        ],
+      ),
     ),
   );
 

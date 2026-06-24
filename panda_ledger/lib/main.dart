@@ -2,7 +2,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
+import 'core/services/notification_service.dart';
 import 'core/theme/app_theme.dart';
+import 'core/theme/theme_mode_provider.dart';
 import 'features/auth/auth_gate.dart';
 
 void main() async {
@@ -22,6 +24,9 @@ void main() async {
     ),
   );
 
+  // 初始化本地通知（平台通道注册，无需 BuildContext）
+  await NotificationService.instance.init();
+
   runApp(
     const ProviderScope(
       child: PandaLedgerApp(),
@@ -34,12 +39,13 @@ class PandaLedgerApp extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final themeMode = ref.watch(themeModeProvider);
     return MaterialApp(
       title: '熊猫记账',
       debugShowCheckedModeBanner: false,
       theme: AppTheme.light,
       darkTheme: AppTheme.dark,
-      themeMode: ThemeMode.system,
+      themeMode: themeMode,
       home: const AuthGate(),
     );
   }

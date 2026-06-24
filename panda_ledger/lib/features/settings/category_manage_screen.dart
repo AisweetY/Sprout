@@ -7,6 +7,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/utils/category_icon_utils.dart';
 import '../../core/utils/id_generator.dart';
 import '../../core/utils/snackbar_utils.dart';
+import '../../core/widgets/error_state_widget.dart';
 import '../../core/widgets/shimmer_loading.dart';
 import '../../data/local/app_database_provider.dart';
 import '../../data/local/database.dart';
@@ -95,7 +96,10 @@ class _CategoryManageScreenState extends ConsumerState<CategoryManageScreen>
       ),
       body: ref.watch(categoriesStreamProvider).when(
         loading: () => PageSkeletons.list(itemCount: 6),
-        error: (e, _) => Center(child: Text('加载失败：$e')),
+        error: (e, _) => ErrorStateWidget(
+          message: ErrorStateWidget.friendlyMessage(e),
+          onRetry: () => ref.invalidate(categoriesStreamProvider),
+        ),
         data: (all) => TabBarView(
           controller: _tabController,
           children: [
@@ -578,7 +582,7 @@ class _ParentGroup extends StatelessWidget {
                   ),
                 ),
                 const SizedBox(width: 4),
-                Icon(Icons.edit_outlined, size: 14, color: theme.colorScheme.outline),
+                Icon(Icons.edit_outlined, size: 14, color: theme.colorScheme.onSurfaceVariant),
                 const Spacer(),
                 PopupMenuButton<String>(
                   padding: EdgeInsets.zero,
@@ -769,7 +773,7 @@ class _AddChildButton extends StatelessWidget {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(Icons.add, size: 24, color: theme.colorScheme.outline),
+            Icon(Icons.add, size: 24, color: theme.colorScheme.onSurfaceVariant),
             const SizedBox(height: 6),
             Text(
               '添加',
@@ -915,7 +919,10 @@ class _ArchivedCategoriesScreen extends ConsumerWidget {
       appBar: AppBar(title: const Text('已归档分类')),
       body: asyncCats.when(
         loading: () => PageSkeletons.list(itemCount: 4),
-        error: (e, _) => Center(child: Text('加载失败：$e')),
+        error: (e, _) => ErrorStateWidget(
+          message: ErrorStateWidget.friendlyMessage(e),
+          onRetry: () => ref.invalidate(allCategoriesStreamProvider),
+        ),
         data: (all) {
           final archived = all.where((c) => c.isArchived).toList();
 
@@ -998,7 +1005,7 @@ class _ArchivedCategoryTile extends StatelessWidget {
       child: ListTile(
         leading: CircleAvatar(
           backgroundColor: theme.colorScheme.surfaceContainerHighest,
-          child: Icon(icon, size: 18, color: theme.colorScheme.outline),
+          child: Icon(icon, size: 18, color: theme.colorScheme.onSurfaceVariant),
         ),
         title: Text(category.name),
         subtitle: Text(isParent ? '一级分类' : '二级分类',

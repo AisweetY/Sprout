@@ -245,3 +245,56 @@ class _SkeletonBar extends StatelessWidget {
     );
   }
 }
+
+/// 滚动加载更多时的底部骨架占位，模拟 RecordCard 布局
+class ListLoadMoreSkeleton extends StatelessWidget {
+  final int itemCount;
+  const ListLoadMoreSkeleton({super.key, this.itemCount = 3});
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Column(
+      children: List.generate(itemCount, (_) => Padding(
+        padding: const EdgeInsets.only(bottom: 8),
+        child: Container(
+          width: double.infinity,
+          padding: const EdgeInsets.all(14),
+          decoration: BoxDecoration(
+            color: theme.colorScheme.surface,
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(
+              color: theme.colorScheme.outlineVariant.withAlpha(60),
+              width: 0.5,
+            ),
+          ),
+          child: Row(
+            children: [
+              const ShimmerBox(width: 32, height: 32, borderRadius: 8),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        const ShimmerBox(width: 48, height: 14),
+                        const SizedBox(width: 8),
+                        const ShimmerBox(width: 14, height: 14),
+                        const SizedBox(width: 4),
+                        const ShimmerBox(width: 56, height: 14),
+                      ],
+                    ),
+                    const SizedBox(height: 6),
+                    const ShimmerBox(width: 80, height: 12),
+                  ],
+                ),
+              ),
+              const ShimmerBox(width: 64, height: 20),
+            ],
+          ),
+        ),
+      )),
+    );
+  }
+}

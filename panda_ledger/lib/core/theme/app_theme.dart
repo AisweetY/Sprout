@@ -29,10 +29,19 @@ class AppTheme {
       brightness: brightness,
       primary: colors.accent,
       onPrimary: AppColors.white,
+      // 选中态/强调容器：浅绿底 + 深绿字（此前未设，回退到实心 accent，
+      // 导致「绿底盖绿图标」等对比度问题）
+      primaryContainer: colors.accentLight,
+      onPrimaryContainer: colors.accentDark,
       secondary: colors.accentLight,
       onSecondary: colors.accent,
+      secondaryContainer: colors.accentLight,
+      onSecondaryContainer: colors.accentDark,
       surface: colors.surface,
       onSurface: colors.textPrimary,
+      // 次要文字/图标色：此前未设，回退到 onSurface（满黑），使所有本应「轻」的
+      // 次要元素渲染成与主文字同等重量 → 主次不分明。映射到语义化的次要灰。
+      onSurfaceVariant: colors.textSecondary,
       error: colors.danger,
       onError: AppColors.white,
       tertiary: colors.warning,
@@ -140,6 +149,30 @@ class AppTheme {
         ),
         bodySmall: TextStyle(
           color: colors.textTertiary,
+        ),
+      ),
+
+      // ── SegmentedButton ──
+      // 竹青调统一：选中态浅绿底+深绿字，未选中态透明底+次要灰字，
+      // 替代系统默认（Material 紫调 + 满色选中），与品牌一致
+      segmentedButtonTheme: SegmentedButtonThemeData(
+        style: ButtonStyle(
+          backgroundColor: WidgetStateProperty.resolveWith((states) {
+            if (states.contains(WidgetState.selected)) return colors.accentLight;
+            return Colors.transparent;
+          }),
+          foregroundColor: WidgetStateProperty.resolveWith((states) {
+            if (states.contains(WidgetState.selected)) return colors.accentDark;
+            return colors.textSecondary;
+          }),
+          iconColor: WidgetStateProperty.resolveWith((states) {
+            if (states.contains(WidgetState.selected)) return colors.accentDark;
+            return colors.textSecondary;
+          }),
+          side: WidgetStatePropertyAll(BorderSide(color: colors.border)),
+          textStyle: const WidgetStatePropertyAll(
+            TextStyle(fontWeight: FontWeight.w500, fontSize: 14),
+          ),
         ),
       ),
 

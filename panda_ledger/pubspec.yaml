@@ -39,11 +39,19 @@ dependencies:
   # 文件分享
   share_plus: ^10.1.4
 
+  # 应用信息（版本号）
+  package_info_plus: ^8.0.0
+
   # CSV 格式
   csv: ^6.0.0
 
   # 本地键值持久化（记住上次选择）
   shared_preferences: ^2.2.0
+
+  # 本地通知 — 每日记账提醒
+  flutter_local_notifications: ^18.0.1
+  timezone: ^0.9.4
+  flutter_timezone: ^3.0.1
 
 dev_dependencies:
   flutter_test:

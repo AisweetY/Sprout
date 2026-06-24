@@ -9,7 +9,7 @@ import 'features/record/record_screen.dart';
 import 'features/record/batch_record_screen.dart';
 import 'features/assets/assets_screen.dart';
 import 'features/insights/insights_screen.dart';
-import 'features/settings/settings_screen.dart';
+import 'features/settings/reminder_provider.dart';
 
 /// 应用外壳 — 底部导航栏
 ///
@@ -30,7 +30,6 @@ class _AppShellState extends ConsumerState<AppShell>
     HomeScreen(),
     AssetsScreen(),
     InsightsScreen(),
-    SettingsScreen(),
   ];
 
   @override
@@ -61,6 +60,9 @@ class _AppShellState extends ConsumerState<AppShell>
 
   Future<void> _initialize() async {
     if (!mounted) return;
+
+    // 触发 ReminderProvider 初始化（若有已启用的提醒，自动重调度）
+    ref.read(reminderProvider);
 
     final syncService = ref.read(syncQueueServiceProvider);
 
@@ -130,20 +132,11 @@ class _AppShellState extends ConsumerState<AppShell>
       bottomNavigationBar: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          // ── 三区记账卡片（仅首页显示）──
+          // ── 记账入口卡片（仅首页显示）──
           if (_currentIndex == 0)
             _RecordEntryCard(
               theme: theme,
               onRecordTap: _onRecordTap,
-              onVoiceTap: () {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(
-                    content: Text('语音识别功能开发中，敬请期待'),
-                    behavior: SnackBarBehavior.floating,
-                    duration: Duration(seconds: 2),
-                  ),
-                );
-              },
               onBatchTap: _onBatchRecordTap,
             ),
 
@@ -167,11 +160,6 @@ class _AppShellState extends ConsumerState<AppShell>
                 selectedIcon: Icon(Icons.insights),
                 label: '分析',
               ),
-              NavigationDestination(
-                icon: Icon(Icons.settings_outlined),
-                selectedIcon: Icon(Icons.settings),
-                label: '设置',
-              ),
             ],
           ),
         ],
@@ -180,126 +168,62 @@ class _AppShellState extends ConsumerState<AppShell>
   }
 }
 
-/// 三区记账入口卡片
+/// 记账入口卡片
 ///
-/// 左：「记一笔收支」→ 跳转记账页
-/// 中：绿色麦克风悬浮按钮（功能开发中）
-/// 右：「一口气记账」→ 跳转批量录入
+/// 主操作「记一笔」占据主视觉权重；「AI 记账」（批量 AI 识别）作为次级入口。
 class _RecordEntryCard extends StatelessWidget {
   final ThemeData theme;
   final VoidCallback onRecordTap;
-  final VoidCallback onVoiceTap;
   final VoidCallback onBatchTap;
 
   const _RecordEntryCard({
     required this.theme,
     required this.onRecordTap,
-    required this.onVoiceTap,
     required this.onBatchTap,
   });
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      margin: const EdgeInsets.fromLTRB(12, 0, 12, 0),
-      child: Card(
-        elevation: 3,
-        shadowColor: theme.colorScheme.shadow.withAlpha(60),
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(16),
-          side: BorderSide(
-            color: theme.colorScheme.outlineVariant.withAlpha(80),
-            width: 0.5,
-          ),
-        ),
-        child: Stack(
-          clipBehavior: Clip.none,
-          alignment: Alignment.center,
-          children: [
-            // 三段布局
-            Row(
-              children: [
-                // 左侧：记一笔收支
-                Expanded(
-                  child: InkWell(
-                    onTap: onRecordTap,
-                    borderRadius: const BorderRadius.horizontal(left: Radius.circular(16)),
-                    child: Padding(
-                      padding: const EdgeInsets.symmetric(vertical: 8),
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Icon(Icons.edit_note, size: 22, color: theme.colorScheme.primary),
-                          const SizedBox(height: 2),
-                          Text('记一笔收支',
-                              style: theme.textTheme.labelSmall?.copyWith(
-                                color: theme.colorScheme.primary,
-                                fontWeight: FontWeight.w500,
-                              )),
-                        ],
-                      ),
-                    ),
-                  ),
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(12, 4, 12, 8),
+      child: Row(
+        children: [
+          // 主操作：记一笔
+          Expanded(
+            child: SizedBox(
+              height: 52,
+              child: FilledButton.icon(
+                onPressed: onRecordTap,
+                icon: const Icon(Icons.edit_note, size: 22),
+                label: const Text(
+                  '记一笔',
+                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
                 ),
-
-                // 中间占位（给悬浮按钮留空间）
-                const SizedBox(width: 52, height: 48),
-
-                // 右侧：一口气记账
-                Expanded(
-                  child: InkWell(
-                    onTap: onBatchTap,
-                    borderRadius: const BorderRadius.horizontal(right: Radius.circular(16)),
-                    child: Padding(
-                      padding: const EdgeInsets.symmetric(vertical: 8),
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Icon(Icons.auto_awesome, size: 22, color: theme.colorScheme.primary),
-                          const SizedBox(height: 2),
-                          Text('一口气记账',
-                              style: theme.textTheme.labelSmall?.copyWith(
-                                color: theme.colorScheme.primary,
-                                fontWeight: FontWeight.w500,
-                              )),
-                        ],
-                      ),
-                    ),
-                  ),
-                ),
-              ],
-            ),
-
-            // 中间悬浮按钮
-            Positioned(
-              top: -12, // 向上悬浮于卡片上方
-              child: Material(
-                color: Colors.transparent,
-                child: InkWell(
-                  onTap: onVoiceTap,
-                  customBorder: const CircleBorder(),
-                  child: Container(
-                    width: 48,
-                    height: 48,
-                    decoration: BoxDecoration(
-                      color: const Color(0xFF4CAF50),
-                      shape: BoxShape.circle,
-                      border: Border.all(color: theme.colorScheme.surface, width: 4),
-                      boxShadow: [
-                        BoxShadow(
-                          color: const Color(0xFF4CAF50).withAlpha(60),
-                          blurRadius: 8,
-                          offset: const Offset(0, 2),
-                        ),
-                      ],
-                    ),
-                    child: const Icon(Icons.mic, color: Colors.white, size: 24),
+                style: FilledButton.styleFrom(
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(16),
                   ),
                 ),
               ),
             ),
-          ],
-        ),
+          ),
+          const SizedBox(width: 10),
+          // 次级操作：AI 批量记账
+          SizedBox(
+            height: 52,
+            child: OutlinedButton.icon(
+              onPressed: onBatchTap,
+              icon: const Icon(Icons.auto_awesome, size: 18),
+              label: const Text('AI 记账'),
+              style: OutlinedButton.styleFrom(
+                foregroundColor: theme.colorScheme.primary,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(16),
+                ),
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }

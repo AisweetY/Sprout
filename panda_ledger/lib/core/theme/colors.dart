@@ -24,7 +24,6 @@ class AppColors {
   // ── 语义色 ──
   final Color danger; // 超支/负债 警示
   final Color dangerLight; // 暖色背景（克制，非鲜红）
-  final Color income; // 收入（可选绿色强调）
   final Color warning; // 中等/警告（如中等置信度）
 
   // ── 分割与边框 ──
@@ -57,7 +56,6 @@ class AppColors {
     required this.accentDark,
     required this.danger,
     required this.dangerLight,
-    required this.income,
     required this.warning,
     required this.divider,
     required this.border,
@@ -81,7 +79,6 @@ class AppColors {
       // 语义色
       danger: Color(0xFFD96459), // 朱砂 — 警示色
       dangerLight: Color(0xFFFDF0ED),
-      income: Color(0xFF3B82F6), // 天青 — 收入蓝（替代原绿色，与支出绿形成对比）
       warning: Color(0xFFF0A030), // 金穗 — 警告色
       // 分割与边框
       divider: Color(0xFFEDEDE9),
@@ -107,7 +104,6 @@ class AppColors {
       // 语义色
       danger: Color(0xFFE8827C), // 暗色下稍亮的朱砂
       dangerLight: Color(0xFF33201E),
-      income: Color(0xFF60A5FA), // 暗色天青
       warning: Color(0xFFF5B041), // 暗色金穗
       // 分割与边框（暗色下原值几乎不可见，增加明度）
       divider: Color(0xFF484B47), // 原 #363936 → 更可见的分割线

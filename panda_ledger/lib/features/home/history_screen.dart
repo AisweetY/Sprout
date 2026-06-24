@@ -1,8 +1,10 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/utils/snackbar_utils.dart';
 import '../../core/widgets/record_card.dart';
+import '../../core/widgets/shimmer_loading.dart';
 import '../../data/local/app_database_provider.dart';
 import '../../data/local/database.dart';
 import '../../data/repository/record_repository.dart';
@@ -43,6 +45,8 @@ class _HistoryScreenState extends ConsumerState<HistoryScreen> {
 
   // 搜索控制器
   final _searchCtrl = TextEditingController();
+  Timer? _searchDebounce;
+  bool _searching = false;
 
   // ScrollController for load-more
   final _scrollCtrl = ScrollController();
@@ -59,9 +63,27 @@ class _HistoryScreenState extends ConsumerState<HistoryScreen> {
 
   @override
   void dispose() {
+    _searchDebounce?.cancel();
     _searchCtrl.dispose();
     _scrollCtrl.dispose();
     super.dispose();
+  }
+
+  /// 搜索输入变化 — 300ms 防抖后自动搜索
+  void _onSearchChanged(String value) {
+    _searchDebounce?.cancel();
+    _searchDebounce = Timer(const Duration(milliseconds: 300), () {
+      final keyword = value.trim().isEmpty ? null : value.trim();
+      if (keyword != _keyword) {
+        setState(() {
+          _keyword = keyword;
+          _searching = true;
+        });
+        _loadRecords(reset: true).then((_) {
+          if (mounted) setState(() => _searching = false);
+        });
+      }
+    });
   }
 
   void _onScroll() {
@@ -123,7 +145,7 @@ class _HistoryScreenState extends ConsumerState<HistoryScreen> {
     }
   }
 
-  /// 批量获取 records 中未缓存的分类名和账户名
+  /// 批量获取 records 中未缓存的分类名和账户名（含转账目标账户）
   Future<void> _fetchNames(List<Record> records) async {
     final catDao = ref.read(categoryDaoProvider);
     final acctDao = ref.read(accountDaoProvider);
@@ -137,6 +159,10 @@ class _HistoryScreenState extends ConsumerState<HistoryScreen> {
       }
       if (!_acctNames.containsKey(r.accountId)) {
         acctIds.add(r.accountId);
+      }
+      // 转账：目标账户也需要查
+      if (r.toAccountId != null && !_acctNames.containsKey(r.toAccountId)) {
+        acctIds.add(r.toAccountId!);
       }
     }
 
@@ -364,9 +390,18 @@ class _HistoryScreenState extends ConsumerState<HistoryScreen> {
                 Expanded(
                   child: TextField(
                     controller: _searchCtrl,
+                    onChanged: _onSearchChanged,
                     decoration: InputDecoration(
                       hintText: '搜索备注…',
-                      prefixIcon: const Icon(Icons.search, size: 20),
+                      prefixIcon: _searching
+                          ? const Padding(
+                              padding: EdgeInsets.all(12),
+                              child: SizedBox(
+                                width: 16, height: 16,
+                                child: CircularProgressIndicator(strokeWidth: 2),
+                              ),
+                            )
+                          : const Icon(Icons.search, size: 20),
                       suffixIcon: _keyword != null && _keyword!.isNotEmpty
                           ? IconButton(
                               icon: const Icon(Icons.clear, size: 18),
@@ -381,10 +416,6 @@ class _HistoryScreenState extends ConsumerState<HistoryScreen> {
                       contentPadding: const EdgeInsets.symmetric(vertical: 10, horizontal: 12),
                       isDense: true,
                     ),
-                    onSubmitted: (v) {
-                      setState(() => _keyword = v.trim().isEmpty ? null : v.trim());
-                      _loadRecords(reset: true);
-                    },
                   ),
                 ),
                 const SizedBox(width: 8),
@@ -429,8 +460,8 @@ class _HistoryScreenState extends ConsumerState<HistoryScreen> {
                         // loading indicator at bottom
                         if (index >= _records.length) {
                           return const Padding(
-                            padding: EdgeInsets.symmetric(vertical: 16),
-                            child: Center(child: CircularProgressIndicator(strokeWidth: 2)),
+                            padding: EdgeInsets.only(top: 4),
+                            child: ListLoadMoreSkeleton(itemCount: 3),
                           );
                         }
 
@@ -447,6 +478,10 @@ class _HistoryScreenState extends ConsumerState<HistoryScreen> {
                         final acctName =
                             _acctNames[record.accountId] ?? '未知账户';
 
+                        final toAcctName = record.toAccountId != null
+                            ? _acctNames[record.toAccountId]
+                            : null;
+
                         return Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
@@ -458,6 +493,7 @@ class _HistoryScreenState extends ConsumerState<HistoryScreen> {
                               categoryName: catName,
                               categoryIcon: catIcon,
                               accountName: acctName,
+                              toAccountName: toAcctName,
                               note: record.note,
                               syncStatus: record.syncStatus,
                               onTap: () => _editRecord(record),

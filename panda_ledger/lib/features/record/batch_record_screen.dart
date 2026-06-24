@@ -1,5 +1,7 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../core/services/text_recognition/models/parsed_transaction.dart';
 import '../../core/services/text_recognition/text_recognition_provider.dart';
@@ -14,7 +16,7 @@ import '../insights/insights_provider.dart';
 import '../assets/assets_provider.dart';
 import 'record_screen.dart';
 
-/// 一口气记账 —— 批量 AI 识别 + 卡片交互 + 批量保存
+/// AI 记账 —— 批量 AI 识别 + 卡片交互 + 批量保存
 class BatchRecordScreen extends ConsumerStatefulWidget {
   const BatchRecordScreen({super.key});
 
@@ -32,11 +34,13 @@ class _BatchCard {
 }
 
 class _BatchRecordScreenState extends ConsumerState<BatchRecordScreen> {
+  static const _draftKey = 'batch_record_draft';
   final _textCtrl = TextEditingController();
   final List<_BatchCard> _cards = [];
   bool _parsing = false;
   bool _saving = false;
   String? _errorMsg;
+  Timer? _draftTimer;
 
   // 分类 / 账户映射
   Map<String, String> _catMap = {};
@@ -46,12 +50,40 @@ class _BatchRecordScreenState extends ConsumerState<BatchRecordScreen> {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) => _loadMaps());
+    _restoreDraft();
+    _textCtrl.addListener(_onTextChanged);
   }
 
   @override
   void dispose() {
+    _draftTimer?.cancel();
+    _textCtrl.removeListener(_onTextChanged);
     _textCtrl.dispose();
     super.dispose();
+  }
+
+  /// 恢复上次未发送的草稿
+  Future<void> _restoreDraft() async {
+    final prefs = await SharedPreferences.getInstance();
+    final draft = prefs.getString(_draftKey);
+    if (draft != null && draft.isNotEmpty && mounted) {
+      _textCtrl.text = draft;
+    }
+  }
+
+  /// 文本变化时防抖保存草稿（500ms）
+  void _onTextChanged() {
+    _draftTimer?.cancel();
+    _draftTimer = Timer(const Duration(milliseconds: 500), () async {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(_draftKey, _textCtrl.text);
+    });
+  }
+
+  /// 清除草稿（解析或保存成功后调用）
+  Future<void> _clearDraft() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove(_draftKey);
   }
 
   Future<void> _loadMaps() async {
@@ -118,6 +150,8 @@ class _BatchRecordScreenState extends ConsumerState<BatchRecordScreen> {
           _parsing = false;
           if (_cards.isEmpty) {
             _errorMsg = '未能识别出有效的收支记录，请尝试更具体的描述（如：中午吃饭35元）';
+          } else {
+            _clearDraft(); // 解析成功，清除草稿
           }
         });
       }
@@ -233,6 +267,8 @@ class _BatchRecordScreenState extends ConsumerState<BatchRecordScreen> {
       ref.invalidate(insightsDataProvider);
       ref.invalidate(assetsDataProvider);
 
+      _clearDraft(); // 保存成功，清除草稿
+
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
@@ -259,7 +295,7 @@ class _BatchRecordScreenState extends ConsumerState<BatchRecordScreen> {
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('一口气记账'),
+        title: const Text('AI 记账'),
         actions: [
           if (_cards.isNotEmpty)
             TextButton.icon(
@@ -354,7 +390,7 @@ class _BatchRecordScreenState extends ConsumerState<BatchRecordScreen> {
                         leading: ReorderableDragStartListener(
                           index: index,
                           child: Icon(Icons.drag_handle,
-                              color: theme.colorScheme.outline, size: 20),
+                              color: theme.colorScheme.onSurfaceVariant, size: 20),
                         ),
                         onTap: () => _editCard(index),
                         onDelete: () => _deleteCard(index),

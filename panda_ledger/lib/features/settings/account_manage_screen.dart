@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/utils/snackbar_utils.dart';
+import '../../core/widgets/error_state_widget.dart';
 import '../../core/widgets/shimmer_loading.dart';
 import '../../data/local/app_database_provider.dart';
 import '../../data/local/database.dart';
@@ -42,7 +43,10 @@ class _AccountManageScreenState extends ConsumerState<AccountManageScreen> {
       ),
       body: ref.watch(allAccountsStreamProvider).when(
         loading: () => PageSkeletons.list(itemCount: 5),
-        error: (e, _) => Center(child: Text('加载失败：$e')),
+        error: (e, _) => ErrorStateWidget(
+          message: ErrorStateWidget.friendlyMessage(e),
+          onRetry: () => ref.invalidate(allAccountsStreamProvider),
+        ),
         data: (accounts) {
           if (accounts.isEmpty) {
             return Center(
@@ -98,6 +102,7 @@ class _AccountManageScreenState extends ConsumerState<AccountManageScreen> {
             account: a,
             onTap: () => _showEditDialog(a),
             onLongPress: () => _showArchiveDialog(a),
+            onCalibrate: () => _showCalibrateDialog(a),
           )),
     ];
   }
@@ -338,6 +343,118 @@ class _AccountManageScreenState extends ConsumerState<AccountManageScreen> {
     );
   }
 
+  /// 余额校准 — 专为「实际余额对不上」场景设计
+  ///
+  /// 展示当前系统余额 + 输入实际余额，差额自动生成 adjustment 记录。
+  /// 弹窗聚焦单一任务，比编辑页的「校正余额」字段更可发现。
+  void _showCalibrateDialog(Account account) {
+    final newBalanceCtrl = TextEditingController();
+    final oldBalance = account.balance;
+
+    showDialog(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDialogState) {
+          final newText = newBalanceCtrl.text;
+          final newVal = double.tryParse(newText);
+          final diff =
+              newVal != null ? (newVal - oldBalance) : 0.0;
+          final hasDiff = diff.abs() > 0;
+
+          return AlertDialog(
+            title: Row(
+              children: [
+                Icon(Icons.tune, size: 22,
+                    color: Theme.of(ctx).colorScheme.primary),
+                const SizedBox(width: 8),
+                const Expanded(child: Text('余额校准')),
+              ],
+            ),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('当前系统余额',
+                    style: Theme.of(ctx).textTheme.bodySmall),
+                const SizedBox(height: 2),
+                Text('¥ ${oldBalance.toStringAsFixed(2)}',
+                    style: Theme.of(ctx).textTheme.titleMedium?.copyWith(
+                          fontWeight: FontWeight.w600,
+                        )),
+                const SizedBox(height: 16),
+                TextField(
+                  controller: newBalanceCtrl,
+                  autofocus: true,
+                  keyboardType:
+                      const TextInputType.numberWithOptions(decimal: true),
+                  decoration: const InputDecoration(
+                    labelText: '实际余额',
+                    helperText: '输入真实余额，差额会自动生成调整记录',
+                    border: OutlineInputBorder(
+                        borderRadius: BorderRadius.all(Radius.circular(12))),
+                  ),
+                  onChanged: (_) => setDialogState(() {}),
+                ),
+                if (hasDiff)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 12),
+                    child: Row(
+                      children: [
+                        Icon(
+                          diff > 0
+                              ? Icons.arrow_upward
+                              : Icons.arrow_downward,
+                          size: 16,
+                          color: Theme.of(ctx).colorScheme.primary,
+                        ),
+                        const SizedBox(width: 6),
+                        Text(
+                          diff > 0
+                              ? '系统余额将增加 ¥${diff.toStringAsFixed(2)}'
+                              : '系统余额将减少 ¥${(-diff).toStringAsFixed(2)}',
+                          style: Theme.of(ctx).textTheme.bodySmall?.copyWith(
+                                color: Theme.of(ctx).colorScheme.primary,
+                              ),
+                        ),
+                      ],
+                    ),
+                  ),
+              ],
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(ctx).pop(),
+                child: const Text('取消'),
+              ),
+              FilledButton(
+                onPressed: hasDiff
+                    ? () async {
+                        // 捕获当前值，避免闭包中的 null safety 推断问题
+                        final confirmed = double.tryParse(newBalanceCtrl.text);
+                        if (confirmed == null || confirmed == oldBalance) return;
+                        final repo = ref.read(accountRepositoryProvider);
+                        await repo.correctBalance(account.id, confirmed);
+                        if (!ctx.mounted) return;
+                        Navigator.of(ctx).pop();
+                        if (mounted) {
+                          SnackbarUtils.show(
+                            context: context,
+                            message:
+                                '已校准「${account.name}」余额至 ¥${confirmed.toStringAsFixed(2)}',
+                            afterDialogClose: true,
+                          );
+                        }
+                      }
+                    : null,
+                child: const Text('确认校准'),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+
   void _showArchiveDialog(Account account) {
     showDialog(
       context: context,
@@ -413,11 +530,13 @@ class _AccountTile extends StatelessWidget {
   final Account account;
   final VoidCallback onTap;
   final VoidCallback onLongPress;
+  final VoidCallback? onCalibrate;
 
   const _AccountTile({
     required this.account,
     required this.onTap,
     required this.onLongPress,
+    this.onCalibrate,
   });
 
   @override
@@ -455,12 +574,24 @@ class _AccountTile extends StatelessWidget {
               ? TextStyle(color: theme.colorScheme.outline.withAlpha(180))
               : null,
         ),
-        trailing: Text(
-          '¥ ${account.balance.toStringAsFixed(2)}',
-          style: theme.textTheme.titleMedium?.copyWith(
-            fontWeight: FontWeight.w500,
-            color: isArchived ? theme.colorScheme.outline : balanceColor,
-          ),
+        trailing: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (!isArchived && onCalibrate != null)
+              IconButton(
+                icon: const Icon(Icons.tune, size: 18),
+                tooltip: '余额校准',
+                onPressed: onCalibrate,
+                visualDensity: VisualDensity.compact,
+              ),
+            Text(
+              '¥ ${account.balance.toStringAsFixed(2)}',
+              style: theme.textTheme.titleMedium?.copyWith(
+                fontWeight: FontWeight.w500,
+                color: isArchived ? theme.colorScheme.outline : balanceColor,
+              ),
+            ),
+          ],
         ),
       ),
     );

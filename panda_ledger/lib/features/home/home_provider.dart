@@ -94,11 +94,13 @@ Future<List<DailyRecordGroup>> _getDailyRecords(
          COALESCE(sub.name, cat.name, '其他') as category_name,
          COALESCE(sub.icon, cat.icon) as category_icon,
          a.name as account_name,
-         a.type as account_type
+         a.type as account_type,
+         ta.name as to_account_name
        FROM records r
        LEFT JOIN categories sub ON r.category_id = sub.id
        LEFT JOIN categories cat ON sub.parent_id = cat.id
        LEFT JOIN accounts a ON r.account_id = a.id
+       LEFT JOIN accounts ta ON r.to_account_id = ta.id
        WHERE r.occurred_at >= ? AND r.occurred_at < ? AND r.deleted = 0
        ORDER BY r.occurred_at DESC''',
     variables: [
@@ -126,6 +128,7 @@ Future<List<DailyRecordGroup>> _getDailyRecords(
       categoryName: row.read<String>('category_name'),
       categoryIcon: row.read<String?>('category_icon'),
       accountName: row.read<String>('account_name'),
+      toAccountName: row.read<String?>('to_account_name'),
       syncStatus: row.read<String>('sync_status'),
     );
 
@@ -213,6 +216,8 @@ class RecordItem {
   final String categoryName;
   final String? categoryIcon;
   final String accountName;
+  /// 仅转账类型：目标账户名
+  final String? toAccountName;
   final String syncStatus;
 
   const RecordItem({
@@ -224,6 +229,7 @@ class RecordItem {
     required this.categoryName,
     this.categoryIcon,
     required this.accountName,
+    this.toAccountName,
     this.syncStatus = 'synced',
   });
 }

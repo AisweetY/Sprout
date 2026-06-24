@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/utils/accessibility_utils.dart';
+import '../../core/widgets/error_state_widget.dart';
 import '../../core/widgets/shimmer_loading.dart';
 import 'assets_provider.dart';
 import 'net_worth_chart.dart';
@@ -61,7 +62,10 @@ class _AssetsScreenState extends ConsumerState<AssetsScreen> {
           Expanded(
             child: asyncData.when(
               loading: () => PageSkeletons.assets(),
-              error: (e, _) => Center(child: Text('加载失败: $e')),
+              error: (e, _) => ErrorStateWidget(
+                message: ErrorStateWidget.friendlyMessage(e),
+                onRetry: () => ref.invalidate(assetsDataProvider(_buildParams())),
+              ),
               data: (data) => _buildContent(context, ref, data, theme),
             ),
           ),
@@ -345,13 +349,15 @@ class _TotalAssetCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(20),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text('净资产', style: theme.textTheme.bodyMedium),
+    return Hero(
+      tag: 'netWorthHero',
+      child: Card(
+        child: Padding(
+          padding: const EdgeInsets.all(20),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text('净资产', style: theme.textTheme.bodyMedium),
             const SizedBox(height: 4),
             TweenAnimationBuilder<double>(
               tween: Tween(begin: 0, end: data.netWorth),
@@ -389,6 +395,7 @@ class _TotalAssetCard extends StatelessWidget {
             ),
           ],
         ),
+      ),
       ),
     );
   }

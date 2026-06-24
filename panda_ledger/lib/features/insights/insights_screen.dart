@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/theme/colors.dart';
 import '../../core/utils/accessibility_utils.dart';
+import '../../core/widgets/error_state_widget.dart';
 import '../../core/widgets/shimmer_loading.dart';
 import 'ai_summary_provider.dart';
 import 'insights_provider.dart';
@@ -82,7 +83,10 @@ class _InsightsScreenState extends ConsumerState<InsightsScreen> {
           Expanded(
             child: asyncData.when(
               loading: () => PageSkeletons.insights(),
-              error: (e, _) => Center(child: Text('加载失败: $e')),
+              error: (e, _) => ErrorStateWidget(
+                message: ErrorStateWidget.friendlyMessage(e),
+                onRetry: () => ref.invalidate(insightsDataProvider(_buildParams())),
+              ),
               data: (data) => _buildContent(context, data, theme),
             ),
           ),

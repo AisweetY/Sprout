@@ -7,6 +7,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/utils/accessibility_utils.dart';
 import '../../core/utils/id_generator.dart';
 import '../../core/utils/snackbar_utils.dart';
+import '../../core/widgets/error_state_widget.dart';
 import '../../core/widgets/shimmer_loading.dart';
 import '../../data/local/app_database_provider.dart';
 import '../../data/local/database.dart';
@@ -51,7 +52,12 @@ class _BudgetSettingsScreenState extends ConsumerState<BudgetSettingsScreen> {
       ),
       body: asyncData.when(
         loading: () => PageSkeletons.list(itemCount: 4),
-        error: (e, _) => Center(child: Text('加载失败: $e')),
+        error: (e, _) => ErrorStateWidget(
+          message: ErrorStateWidget.friendlyMessage(e),
+          onRetry: () => ref.invalidate(
+            categoryBudgetDataProvider(BudgetParams(year: _year, month: _month)),
+          ),
+        ),
         data: (data) => _buildContent(context, data, theme),
       ),
     );
@@ -487,7 +493,7 @@ class _SavingGoalCard extends StatelessWidget {
                   Icons.savings_outlined,
                   color: hasGoal
                       ? theme.colorScheme.primary
-                      : theme.colorScheme.outline,
+                      : theme.colorScheme.onSurfaceVariant,
                 ),
               ),
               const SizedBox(width: 16),
@@ -511,7 +517,7 @@ class _SavingGoalCard extends StatelessWidget {
                   ],
                 ),
               ),
-              Icon(Icons.chevron_right, color: theme.colorScheme.outline),
+              Icon(Icons.chevron_right, color: theme.colorScheme.onSurfaceVariant),
             ],
           ),
         ),

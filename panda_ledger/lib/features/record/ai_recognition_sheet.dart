@@ -139,7 +139,7 @@ class _AiRecognitionSheetState extends ConsumerState<AiRecognitionSheet> {
                           mainAxisSize: MainAxisSize.min,
                           children: [
                             Icon(Icons.auto_awesome, size: 18,
-                                color: theme.colorScheme.outline),
+                                color: theme.colorScheme.onSurfaceVariant),
                             const SizedBox(width: 6),
                             Text('输入描述后点击解析',
                                 style: theme.textTheme.bodyMedium),
@@ -225,7 +225,7 @@ class _ConfirmationCardState extends State<_ConfirmationCard> {
         // 类型
         Row(
           children: [
-            SizedBox(width: 64, child: Text('类型', style: TextStyle(color: theme.colorScheme.outline))),
+            SizedBox(width: 64, child: Text('类型', style: TextStyle(color: theme.colorScheme.onSurfaceVariant))),
             Expanded(
               child: SegmentedButton<String>(
                 segments: const [
@@ -350,12 +350,12 @@ class _FieldRow extends StatelessWidget {
     final theme = Theme.of(context);
     return Row(
       children: [
-        SizedBox(width: 64, child: Text(label, style: TextStyle(color: theme.colorScheme.outline))),
+        SizedBox(width: 64, child: Text(label, style: TextStyle(color: theme.colorScheme.onSurfaceVariant))),
         Expanded(child: Text(value, style: theme.textTheme.bodyLarge)),
         Icon(
           isVerified ? Icons.check_circle_outline : Icons.edit_outlined,
           size: 18,
-          color: isVerified ? theme.colorScheme.primary : theme.colorScheme.outline,
+          color: isVerified ? theme.colorScheme.primary : theme.colorScheme.onSurfaceVariant,
         ),
       ],
     );

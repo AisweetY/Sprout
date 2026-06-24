@@ -145,7 +145,7 @@ class _NetWorthChartState extends State<NetWorthChart> {
                             showData[idx].label,
                             style: TextStyle(
                                 fontSize: 11,
-                                color: theme.colorScheme.outline),
+                                color: theme.colorScheme.onSurfaceVariant),
                           ),
                         );
                       },
@@ -161,7 +161,7 @@ class _NetWorthChartState extends State<NetWorthChart> {
                           _formatAmount(value),
                           style: TextStyle(
                               fontSize: 10,
-                              color: theme.colorScheme.outline),
+                              color: theme.colorScheme.onSurfaceVariant),
                         );
                       },
                     ),

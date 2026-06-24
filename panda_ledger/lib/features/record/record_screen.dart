@@ -17,23 +17,18 @@ import '../home/home_provider.dart';
 import '../insights/insights_provider.dart';
 import '../assets/assets_provider.dart';
 import '../../core/services/text_recognition/models/parsed_transaction.dart';
-import '../../core/services/text_recognition/text_recognition_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-/// 完整记账页面（重设计版）
+/// 记一笔页（极简重构版）
 ///
-/// 结构：AI 输入区 → 金额显示 → 类型 Tab → 分类网格 → 账户卡片 → 备注 → 日期 → 键盘
+/// 布局（从上到下，全屏固定，无滚动）：
+///   类型 Tab → 金额大字区 → 分类横向滑动 → 辅助信息行 → 数字键盘
 ///
-/// 支持编辑模式：传入 [editRecord] 参数即进入编辑模式，表单预填已有数据，
-/// 底部按钮文案变为"保存"，提交时走更新逻辑。
+/// 键盘始终显示，省去"展开详情"步骤。
+/// 备注通过底部弹窗输入，账户/日期通过 chip 点击弹出。
 class RecordScreen extends ConsumerStatefulWidget {
-  /// 编辑模式：传入已有记录
   final Record? editRecord;
-
-  /// 批量记账模式：预填解析结果
   final ParsedTransaction? batchParsed;
-
-  /// 批量记账保存回调（返回编辑后的 ParsedTransaction）
   final void Function(ParsedTransaction)? onBatchSaved;
 
   const RecordScreen({
@@ -49,8 +44,8 @@ class RecordScreen extends ConsumerStatefulWidget {
 
 class _RecordScreenState extends ConsumerState<RecordScreen> {
   // ── 核心状态 ──
-  String _amount = ''; // 不再预设为 '0'，空字符串表示未输入
-  String _recordType = 'expense'; // expense / income / transfer
+  String _amount = '';
+  String _recordType = 'expense';
   String? _categoryId;
   String? _subcategoryId;
   String? _accountId;
@@ -58,35 +53,31 @@ class _RecordScreenState extends ConsumerState<RecordScreen> {
   String _note = '';
   DateTime _occurredAt = DateTime.now();
   bool _isSubmitting = false;
-  bool _showNumpad = true;
+  bool _showSuccess = false;
+  bool _categoriesLoading = false;
 
-  // ── 控制器（复用，避免每次 build 重建）──
   late final TextEditingController _noteController;
 
   // ── 数据 ──
   List<Category> _allCategories = [];
-  // parentId → children 分组
   Map<String, List<Category>> _childrenByParent = {};
-  // 有子分类的一级分类
   List<Category> _parentCategoriesWithChildren = [];
   List<Account> _accounts = [];
-  // B3：内联分类网格（最近使用 + 填充，最多 8 个叶子分类）
   List<Category> _recentLeafCategories = [];
 
-  // ── SharedPreferences 存储键 ──
+  // ── 分类横向行滚动控制 ──
+  final ScrollController _categoryScrollCtrl = ScrollController();
+
+  // ── SharedPreferences 键 ──
   static const _pkType = 'last_record_type';
   static const _pkCat = 'last_category_id';
   static const _pkParentCat = 'last_parent_category_id';
   static const _pkAcct = 'last_account_id';
   static const _pkToAcct = 'last_to_account_id';
-  // 最近使用分类（按记账类型分别记录，内联网格排序依据）
   static const _pkRecentExpenseCats = 'recent_expense_category_ids';
   static const _pkRecentIncomeCats = 'recent_income_category_ids';
 
-  /// 是否为编辑模式
   bool get _isEditMode => widget.editRecord != null;
-
-  /// 是否为批量记账模式
   bool get _isBatchMode => widget.batchParsed != null;
 
   @override
@@ -98,7 +89,6 @@ class _RecordScreenState extends ConsumerState<RecordScreen> {
     WidgetsBinding.instance.addPostFrameCallback((_) => _loadData());
   }
 
-  /// 编辑模式：从已有记录预填表单
   void _initFromEditRecord() {
     final r = widget.editRecord;
     if (r == null) return;
@@ -106,7 +96,6 @@ class _RecordScreenState extends ConsumerState<RecordScreen> {
     if (r.amount % 1 != 0) _amount = r.amount.toStringAsFixed(2);
     _recordType = r.type;
     _categoryId = r.categoryId;
-    // 若 categoryId 是子分类，需要查父分类
     _accountId = r.accountId;
     _toAccountId = r.toAccountId;
     _note = r.note ?? '';
@@ -114,7 +103,6 @@ class _RecordScreenState extends ConsumerState<RecordScreen> {
     _occurredAt = r.occurredAt;
   }
 
-  /// 批量记账模式：从解析结果预填表单
   void _initFromBatchParsed() {
     final p = widget.batchParsed;
     if (p == null) return;
@@ -133,6 +121,7 @@ class _RecordScreenState extends ConsumerState<RecordScreen> {
   @override
   void dispose() {
     _noteController.dispose();
+    _categoryScrollCtrl.dispose();
     super.dispose();
   }
 
@@ -151,7 +140,6 @@ class _RecordScreenState extends ConsumerState<RecordScreen> {
         _allCategories = cats;
         _accounts = accts;
         _rebuildCategoryGroups();
-        // 编辑/batch 模式：反查子分类的父级
         if ((_isEditMode || _isBatchMode) && _categoryId != null) {
           final cat = cats.where((c) => c.id == _categoryId).firstOrNull;
           if (cat != null && cat.parentId != null) {
@@ -163,11 +151,9 @@ class _RecordScreenState extends ConsumerState<RecordScreen> {
           _accountId = accts.first.id;
         }
       });
-      // 只在无预填数据时恢复上次选择，避免覆盖编辑/批量记账的预填值
       if (!_isEditMode && widget.batchParsed == null) {
         _restoreLastSelection();
       }
-      // 加载内联分类网格（_allCategories 更新后才能执行）
       _loadRecentCategories();
     });
   }
@@ -178,13 +164,13 @@ class _RecordScreenState extends ConsumerState<RecordScreen> {
         setState(() {
           _allCategories = cats;
           _rebuildCategoryGroups();
+          _categoriesLoading = false;
         });
         _loadRecentCategories();
       }
     });
   }
 
-  /// 分类弹窗中新建分类后的回调：刷新分类列表并自动选中新分类
   void _onCategoryCreated(String newCategoryId) {
     ref.read(categoryDaoProvider).getCategoriesByKind(_recordType).then((cats) {
       if (!mounted) return;
@@ -201,15 +187,12 @@ class _RecordScreenState extends ConsumerState<RecordScreen> {
             _subcategoryId = null;
           }
         });
-        // 关闭分类选择弹窗
         Navigator.of(context).pop();
-        // 刷新内联分类网格（新建分类可能出现在首位）
         _loadRecentCategories();
       }
     });
   }
 
-  /// 异步刷新分类（用于 AI 解析流程中的 await）
   Future<void> _refreshCategoriesAsync() async {
     final cats = await ref.read(categoryDaoProvider).getCategoriesByKind(_recordType);
     if (mounted) {
@@ -221,53 +204,36 @@ class _RecordScreenState extends ConsumerState<RecordScreen> {
     }
   }
 
-  /// 从扁平列表重建层级分组：只保留有子分类的一级分类
   void _rebuildCategoryGroups() {
     _childrenByParent = {};
     for (final cat in _allCategories.where((c) => c.parentId != null)) {
       _childrenByParent.putIfAbsent(cat.parentId!, () => []).add(cat);
     }
-    // 只保留有关联子分类的一级分类
     _parentCategoriesWithChildren = _allCategories
         .where((c) => c.parentId == null && _childrenByParent.containsKey(c.id))
         .toList();
   }
 
-  // ── B3 内联分类网格：最近使用记录 ──
-
-  /// 获取所有叶子分类（parentId != null 且未归档）
   List<Category> _getLeafCategories() {
-    return _allCategories
-        .where((c) => c.parentId != null && !c.isArchived)
-        .toList();
+    return _allCategories.where((c) => c.parentId != null && !c.isArchived).toList();
   }
 
-  /// 加载内联网格分类列表：已选 → 最近使用 → 其余补位（最多 8 个）
   Future<void> _loadRecentCategories() async {
     final prefs = await SharedPreferences.getInstance();
-    final key = _recordType == 'income'
-        ? _pkRecentIncomeCats
-        : _pkRecentExpenseCats;
+    final key = _recordType == 'income' ? _pkRecentIncomeCats : _pkRecentExpenseCats;
     final recentIds = prefs.getStringList(key) ?? [];
     final allLeafs = _getLeafCategories();
     final result = <Category>[];
 
-    // 始终将当前已选中的分类排在第一位（编辑模式保证其可见）
     if (_subcategoryId != null) {
       final sel = allLeafs.where((c) => c.id == _subcategoryId).firstOrNull;
       if (sel != null) result.add(sel);
     }
-
-    // 按最近使用顺序追加（跳过重复）
     for (final id in recentIds) {
       if (result.length >= 8) break;
       final cat = allLeafs.where((c) => c.id == id).firstOrNull;
-      if (cat != null && !result.any((r) => r.id == cat.id)) {
-        result.add(cat);
-      }
+      if (cat != null && !result.any((r) => r.id == cat.id)) result.add(cat);
     }
-
-    // 剩余位置用顺序叶子分类填充
     if (result.length < 8) {
       final existingIds = result.map((c) => c.id).toSet();
       for (final cat in allLeafs) {
@@ -279,12 +245,9 @@ class _RecordScreenState extends ConsumerState<RecordScreen> {
     if (mounted) setState(() => _recentLeafCategories = result);
   }
 
-  /// 在 SharedPreferences 中将 categoryId 置顶（最多保留 12 条）
   Future<void> _updateRecentCategory(String categoryId) async {
     final prefs = await SharedPreferences.getInstance();
-    final key = _recordType == 'income'
-        ? _pkRecentIncomeCats
-        : _pkRecentExpenseCats;
+    final key = _recordType == 'income' ? _pkRecentIncomeCats : _pkRecentExpenseCats;
     final current = prefs.getStringList(key) ?? [];
     current.removeWhere((id) => id == categoryId);
     current.insert(0, categoryId);
@@ -292,15 +255,16 @@ class _RecordScreenState extends ConsumerState<RecordScreen> {
     await prefs.setStringList(key, current);
   }
 
-  /// 获取当前选中账户的显示名称
   String? get _selectedAccountName {
     if (_accountId == null) return null;
     return _accounts.where((a) => a.id == _accountId).map((a) => a.name).firstOrNull;
   }
 
-  /// 弹出分类选择底部弹窗
+  // ─────────────────────────────────────────────
+  // 弹窗：分类选择
+  // ─────────────────────────────────────────────
+
   void _showCategoryPicker() {
-    setState(() => _showNumpad = false);
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
@@ -316,20 +280,31 @@ class _RecordScreenState extends ConsumerState<RecordScreen> {
         onSelectChild: (childId) {
           setState(() {
             _subcategoryId = childId;
-            // 反查 child 的 parentId 设为 _categoryId
             final child = _allCategories.firstWhere((c) => c.id == childId);
             _categoryId = child.parentId;
           });
           Navigator.pop(ctx);
+          // 选中后刷新最近分类列表（置顶），并滚回行首
+          _loadRecentCategories().then((_) {
+            if (_categoryScrollCtrl.hasClients) {
+              _categoryScrollCtrl.animateTo(
+                0,
+                duration: const Duration(milliseconds: 280),
+                curve: Curves.easeOut,
+              );
+            }
+          });
         },
         onCategoryCreated: _onCategoryCreated,
       ),
     );
   }
 
-  /// 弹出账户选择底部弹窗
+  // ─────────────────────────────────────────────
+  // 弹窗：账户选择
+  // ─────────────────────────────────────────────
+
   void _showAccountPicker() {
-    setState(() => _showNumpad = false);
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
@@ -348,6 +323,126 @@ class _RecordScreenState extends ConsumerState<RecordScreen> {
     );
   }
 
+  void _showFromAccountPicker() {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      useSafeArea: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (ctx) => _AccountPickerSheet(
+        accounts: _accounts,
+        selectedId: _accountId,
+        title: '选择转出账户',
+        onSelect: (id) {
+          setState(() {
+            _accountId = id;
+            // 若转入与转出相同，清空转入
+            if (_toAccountId == id) _toAccountId = null;
+          });
+          Navigator.pop(ctx);
+        },
+      ),
+    );
+  }
+
+  void _showToAccountPicker() {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      useSafeArea: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (ctx) => _AccountPickerSheet(
+        accounts: _accounts.where((a) => a.id != _accountId).toList(),
+        selectedId: _toAccountId,
+        title: '选择转入账户',
+        onSelect: (id) {
+          setState(() => _toAccountId = id);
+          Navigator.pop(ctx);
+        },
+      ),
+    );
+  }
+
+  // ─────────────────────────────────────────────
+  // 弹窗：备注输入
+  // ─────────────────────────────────────────────
+
+  void _showNoteSheet() {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      useSafeArea: true,
+      backgroundColor: Colors.transparent,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setSheetState) => Padding(
+          padding: EdgeInsets.only(
+            bottom: MediaQuery.of(ctx).viewInsets.bottom,
+          ),
+          child: Container(
+            decoration: BoxDecoration(
+              color: Theme.of(ctx).colorScheme.surface,
+              borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
+            ),
+            padding: const EdgeInsets.fromLTRB(16, 16, 16, 20),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Text('备注', style: Theme.of(ctx).textTheme.titleMedium),
+                    TextButton(
+                      onPressed: () => Navigator.pop(ctx),
+                      child: const Text('完成'),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                TextField(
+                  controller: _noteController,
+                  autofocus: true,
+                  maxLines: 3,
+                  minLines: 1,
+                  decoration: InputDecoration(
+                    hintText: '描述这笔账…',
+                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+                    contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                    suffixIcon: _noteController.text.isNotEmpty
+                        ? IconButton(
+                            icon: const Icon(Icons.clear, size: 18),
+                            onPressed: () {
+                              _noteController.clear();
+                              setState(() => _note = '');
+                              setSheetState(() {});
+                            },
+                          )
+                        : null,
+                  ),
+                  onChanged: (v) {
+                    setState(() => _note = v);
+                    setSheetState(() {});
+                  },
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  // ─────────────────────────────────────────────
+  // 类型切换
+  // ─────────────────────────────────────────────
+
   void _onTypeChanged(String type) {
     setState(() {
       _recordType = type;
@@ -355,253 +450,20 @@ class _RecordScreenState extends ConsumerState<RecordScreen> {
       _subcategoryId = null;
       _childrenByParent = {};
       _parentCategoriesWithChildren = [];
-      _recentLeafCategories = []; // 立即清空，切换时不显示旧类型分类
+      _recentLeafCategories = [];
       _toAccountId = null;
+      _categoriesLoading = true;
     });
-    _refreshCategories(); // 内部会调用 _loadRecentCategories
+    _refreshCategories();
   }
 
-  // ═════════════════════════════════════════════════════════
-  // AI 智能解析
-  // ═════════════════════════════════════════════════════════
-
-  /// 弹出 AI 智能记账输入对话框
-  Future<void> _showAiDialog() async {
-    final inputCtrl = TextEditingController();
-    bool isParsing = false;
-
-    await showDialog<bool>(
-      context: context,
-      barrierDismissible: false,
-      builder: (ctx) => StatefulBuilder(
-        builder: (ctx, setDialogState) => AlertDialog(
-          title: Row(
-            children: [
-              Icon(Icons.auto_awesome, color: Theme.of(ctx).colorScheme.primary, size: 20),
-              const SizedBox(width: 8),
-              const Text('AI 智能记账'),
-            ],
-          ),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              TextField(
-                controller: inputCtrl,
-                autofocus: true,
-                maxLines: 3,
-                minLines: 2,
-                decoration: InputDecoration(
-                  hintText: '描述这笔账单，如：昨天打车花了32元',
-                  hintStyle: TextStyle(color: Theme.of(ctx).colorScheme.onSurfaceVariant.withAlpha(120)),
-                  border: const OutlineInputBorder(),
-                ),
-                enabled: !isParsing,
-              ),
-            ],
-          ),
-          actions: [
-            TextButton(
-              onPressed: isParsing ? null : () => Navigator.pop(ctx, false),
-              child: const Text('取消'),
-            ),
-            FilledButton.icon(
-              icon: isParsing
-                  ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
-                  : const Icon(Icons.send_rounded, size: 18),
-              label: Text(isParsing ? '识别中…' : '确定'),
-              onPressed: isParsing
-                  ? null
-                  : () async {
-                      final input = inputCtrl.text.trim();
-                      if (input.isEmpty) return;
-                      setDialogState(() => isParsing = true);
-                      try {
-                        await _aiParseFromInput(input);
-                        if (ctx.mounted) Navigator.pop(ctx, true);
-                      } catch (e) {
-                        if (ctx.mounted) {
-                          setDialogState(() => isParsing = false);
-                          ScaffoldMessenger.of(ctx).showSnackBar(
-                            SnackBar(
-                              content: Text('识别失败: $e'),
-                              behavior: SnackBarBehavior.floating,
-                            ),
-                          );
-                        }
-                      }
-                    },
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  /// AI 解析核心逻辑（由弹窗入口调用）
-  Future<void> _aiParseFromInput(String input) async {
-    if (input.isEmpty) return;
-
-    try {
-      final service = ref.read(textRecognitionProvider);
-      final categoryDao = ref.read(categoryDaoProvider);
-
-      // 构建已有分类映射（含二级分类：名称→ID）
-      final cats = await categoryDao.getActiveCategories();
-      final catMap = <String, String>{};
-      for (final c in cats) {
-        catMap[c.name] = c.id;
-      }
-
-      // 构建账户映射
-      final accountRepo = ref.read(accountRepositoryProvider);
-      final accts = await accountRepo.getActiveAccounts();
-      final acctMap = <String, String>{};
-      for (final a in accts) {
-        acctMap[a.name] = a.id;
-      }
-
-      final result = await service.parse(
-        userInput: input,
-        existingCategories: catMap,
-        existingAccounts: acctMap,
-      );
-
-      if (!mounted) return;
-
-      // 处理分类匹配 — 确保最终只填入二级分类
-      if (result.matchType == MatchType.suggestNew &&
-          result.newCategorySuggestion != null) {
-        // 解析 "一级分类→二级分类" 格式
-        final suggestion = result.newCategorySuggestion!;
-        final parts = suggestion.split('→');
-        final parentName = parts.length > 1 ? parts[0].trim() : null;
-        final childName = parts.length > 1 ? parts[1].trim() : suggestion;
-
-        final confirmMsg = parentName != null
-            ? '新增到「$parentName」下的「$childName」分类？'
-            : '是否新增「$childName」分类？';
-
-        final shouldCreate = await showDialog<bool>(
-          context: context,
-          builder: (ctx) => AlertDialog(
-            title: const Text('未找到匹配分类'),
-            content: Text(confirmMsg),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.pop(ctx, false),
-                child: const Text('否'),
-              ),
-              FilledButton(
-                onPressed: () => Navigator.pop(ctx, true),
-                child: const Text('是'),
-              ),
-            ],
-          ),
-        );
-
-        if (shouldCreate == true) {
-          final userId = ref.read(currentUserIdProvider);
-
-          // 如果需要一级分类，先查找或创建
-          String? parentId;
-          if (parentName != null) {
-            // 查找已有的一级分类
-            final existingParent = await categoryDao.getByName(parentName, _recordType);
-            if (existingParent != null) {
-              parentId = existingParent.id;
-            } else {
-              // 创建新的一级分类
-              parentId = IdGenerator.generate();
-              await categoryDao.insertCategory(CategoriesCompanion(
-                id: Value(parentId),
-                userId: Value(userId),
-                name: Value(parentName),
-                kind: Value(_recordType),
-              ));
-            }
-          }
-
-          // 创建二级分类
-          final childId = IdGenerator.generate();
-          await categoryDao.insertCategory(CategoriesCompanion(
-            id: Value(childId),
-            userId: Value(userId),
-            name: Value(childName),
-            parentId: Value.absentIfNull(parentId),
-            kind: Value(_recordType),
-          ));
-
-          // 刷新分类数据并自动选中新分类
-          await _refreshCategoriesAsync();
-          if (mounted) {
-            setState(() {
-              _subcategoryId = childId;
-              _categoryId = parentId;
-            });
-          }
-        }
-      }
-
-      // 回填表单
-      setState(() {
-        if (result.amount != null) {
-          _amount = result.amount!.toStringAsFixed(0);
-          if (result.amount! % 1 != 0) {
-            _amount = result.amount!.toStringAsFixed(2);
-          }
-        }
-        if (result.type != null && result.type != _recordType) {
-          _recordType = result.type!;
-          _refreshCategories();
-        }
-
-        // 分类回填：优先使用 subcategoryId（二级分类），从中推导一级分类
-        if (result.subcategoryId != null) {
-          _subcategoryId = result.subcategoryId;
-          // 反查该二级分类所属的一级分类
-          final childCat = _allCategories
-              .where((c) => c.id == result.subcategoryId)
-              .firstOrNull;
-          if (childCat != null && childCat.parentId != null) {
-            _categoryId = childCat.parentId;
-          }
-        } else if (result.categoryId != null) {
-          // 只有一级分类 ID（来自规则引擎或旧版 AI）→ 判断是否为叶子节点
-          final matched = _allCategories
-              .where((c) => c.id == result.categoryId)
-              .firstOrNull;
-          if (matched != null) {
-            if (matched.parentId != null) {
-              // 本身是二级分类，直接使用
-              _subcategoryId = matched.id;
-              _categoryId = matched.parentId;
-            } else {
-              // 是一级分类，不直接填入（等待用户选择二级分类）
-              // 不清除已有选择，给用户留下提示
-            }
-          }
-        }
-
-        if (result.accountId != null) {
-          _accountId = result.accountId;
-        }
-        if (result.note != null) {
-          _note = result.note!;
-          _noteController.text = result.note!;
-        }
-        if (result.occurredAt != null) _occurredAt = result.occurredAt!;
-      });
-    } catch (e) {
-      rethrow; // 由弹窗层处理错误展示
-    }
-  }
-
-  // ═════════════════════════════════════════════════════════
-  // 键盘处理
-  // ═════════════════════════════════════════════════════════
+  // ─────────────────────────────────────────────
+  // 键盘输入
+  // ─────────────────────────────────────────────
 
   void _onKeyTap(String key) {
     if (_isSubmitting) return;
+    HapticFeedback.lightImpact();
     setState(() {
       if (key == '⌫') {
         _amount = _amount.length > 1 ? _amount.substring(0, _amount.length - 1) : '';
@@ -626,12 +488,11 @@ class _RecordScreenState extends ConsumerState<RecordScreen> {
     });
   }
 
-  // ═════════════════════════════════════════════════════════
+  // ─────────────────────────────────────────────
   // 提交
-  // ═════════════════════════════════════════════════════════
+  // ─────────────────────────────────────────────
 
   Future<void> _submitRecord() async {
-    // 防重入：如果上一次提交尚未完成，直接忽略本次调用
     if (_isSubmitting) return;
 
     final amount = double.tryParse(_amount);
@@ -652,7 +513,6 @@ class _RecordScreenState extends ConsumerState<RecordScreen> {
     setState(() => _isSubmitting = true);
 
     try {
-      // 若未选择分类，默认归入「其他」
       String? effectiveCategoryId = _subcategoryId ?? _categoryId;
       if (effectiveCategoryId == null && _recordType != 'transfer') {
         final categoryDao = ref.read(categoryDaoProvider);
@@ -665,8 +525,6 @@ class _RecordScreenState extends ConsumerState<RecordScreen> {
       final repo = ref.read(recordRepositoryProvider);
 
       if (_isBatchMode) {
-        // 批量记账模式：构造 ParsedTransaction 通过回调返回
-        final originalRawInput = widget.batchParsed?.rawInput ?? '';
         final updated = ParsedTransaction(
           amount: amount,
           type: _recordType,
@@ -680,11 +538,10 @@ class _RecordScreenState extends ConsumerState<RecordScreen> {
           occurredAt: _occurredAt,
           confidence: 1.0,
           matchType: MatchType.existing,
-          rawInput: originalRawInput,
+          rawInput: widget.batchParsed?.rawInput ?? '',
         );
         widget.onBatchSaved?.call(updated);
       } else if (_isEditMode) {
-        // 编辑模式：更新已有记录
         final oldRecord = widget.editRecord!;
         await repo.updateRecord(
           recordId: oldRecord.id,
@@ -701,7 +558,6 @@ class _RecordScreenState extends ConsumerState<RecordScreen> {
           oldToAccountId: oldRecord.toAccountId,
         );
       } else {
-        // 创建模式
         await repo.createRecord(
           userId: userId,
           accountId: _accountId!,
@@ -715,27 +571,28 @@ class _RecordScreenState extends ConsumerState<RecordScreen> {
       }
 
       if (_isBatchMode) {
-        // 批量记账模式：直接返回，不刷新不弹 toast
         if (mounted) Navigator.of(context).pop();
         return;
       }
 
-      HapticFeedback.lightImpact();
+      HapticFeedback.heavyImpact();
       if (mounted) {
-        setState(() => _showNumpad = false);
-        SnackbarUtils.show(
-          context: context,
-          message: _isEditMode ? '已保存修改' : '已记录 ¥$_amount',
-          duration: const Duration(seconds: 1),
-        );
+        setState(() => _showSuccess = true);
+        await Future.delayed(const Duration(milliseconds: 400));
+
+        if (mounted) {
+          SnackbarUtils.show(
+            context: context,
+            message: _isEditMode ? '已保存修改' : '已记录 ¥$_amount',
+            duration: const Duration(seconds: 1),
+          );
+        }
       }
 
-      // 通知所有相关页面刷新
       ref.invalidate(homeDataProvider);
       ref.invalidate(insightsDataProvider);
       ref.invalidate(assetsDataProvider);
 
-      // 保存本次选择（在清空状态之前同步捕获值，避免异步问题）
       if (!_isBatchMode) {
         _saveLastSelection(
           type: _recordType,
@@ -744,24 +601,25 @@ class _RecordScreenState extends ConsumerState<RecordScreen> {
           acctId: _accountId,
           toAcctId: _toAccountId,
         );
-        // 更新最近使用分类列表（B3：用于内联网格下次打开时的排序）
         final savedCatId = _subcategoryId ?? _categoryId;
         if (savedCatId != null && _recordType != 'transfer') {
           _updateRecentCategory(savedCatId);
         }
       }
 
-      // 重置表单（新建模式）
-      if (!_isEditMode) {
+      if (mounted) {
         setState(() {
-          _amount = '';
-          _note = '';
-          _noteController.clear();
-          _categoryId = null;
-          _subcategoryId = null;
+          if (!_isEditMode) {
+            _amount = '';
+            _note = '';
+            _noteController.clear();
+            _categoryId = null;
+            _subcategoryId = null;
+          }
+          _showSuccess = false;
+          _isSubmitting = false;
         });
       }
-      setState(() => _isSubmitting = false);
     } catch (e) {
       if (mounted) {
         setState(() => _isSubmitting = false);
@@ -772,9 +630,9 @@ class _RecordScreenState extends ConsumerState<RecordScreen> {
     }
   }
 
-  // ═════════════════════════════════════════════════════════
-  // 记住上一次选择（SharedPreferences）
-  // ═════════════════════════════════════════════════════════
+  // ─────────────────────────────────────────────
+  // SharedPreferences 记忆上次选择
+  // ─────────────────────────────────────────────
 
   Future<void> _saveLastSelection({
     String? type,
@@ -784,25 +642,13 @@ class _RecordScreenState extends ConsumerState<RecordScreen> {
     String? toAcctId,
   }) async {
     final prefs = await SharedPreferences.getInstance();
-    if (type != null) {
-      await prefs.setString(_pkType, type);
-    }
-    if (catId != null) {
-      await prefs.setString(_pkCat, catId);
-    }
-    if (parentCatId != null) {
-      await prefs.setString(_pkParentCat, parentCatId);
-    }
-    if (acctId != null) {
-      await prefs.setString(_pkAcct, acctId);
-    }
-    if (toAcctId != null) {
-      await prefs.setString(_pkToAcct, toAcctId);
-    }
+    if (type != null) await prefs.setString(_pkType, type);
+    if (catId != null) await prefs.setString(_pkCat, catId);
+    if (parentCatId != null) await prefs.setString(_pkParentCat, parentCatId);
+    if (acctId != null) await prefs.setString(_pkAcct, acctId);
+    if (toAcctId != null) await prefs.setString(_pkToAcct, toAcctId);
   }
 
-  /// 从 SharedPreferences 恢复上次选择的分类、账户、类型。
-  /// 必须在 _allCategories 和 _accounts 加载完成后调用。
   Future<void> _restoreLastSelection() async {
     final prefs = await SharedPreferences.getInstance();
     final lastType = prefs.getString(_pkType);
@@ -812,20 +658,13 @@ class _RecordScreenState extends ConsumerState<RecordScreen> {
     final lastToAcctId = prefs.getString(_pkToAcct);
 
     bool needRefresh = false;
-
-    // 1. 恢复类型 Tab（如果和当前默认不同）
     if (lastType != null && lastType != _recordType) {
       _recordType = lastType;
       needRefresh = true;
     }
-
-    if (needRefresh) {
-      await _refreshCategoriesAsync();
-    }
-
+    if (needRefresh) await _refreshCategoriesAsync();
     if (!mounted) return;
 
-    // 2. 恢复分类：优先二级分类，其次一级分类兜底
     if (lastCatId != null) {
       final cat = _allCategories
           .where((c) => c.id == lastCatId && !c.isArchived)
@@ -846,29 +685,22 @@ class _RecordScreenState extends ConsumerState<RecordScreen> {
       final parent = _allCategories
           .where((c) => c.id == lastParentCatId && !c.isArchived)
           .firstOrNull;
-      if (parent != null) {
-        setState(() => _categoryId = lastParentCatId);
-      }
+      if (parent != null) setState(() => _categoryId = lastParentCatId);
     }
 
-    // 3. 恢复账户
     if (lastAcctId != null) {
-      final acct = _accounts
-          .where((a) => a.id == lastAcctId && !a.isArchived)
-          .firstOrNull;
-      if (acct != null) {
-        setState(() => _accountId = lastAcctId);
-      }
+      final acct =
+          _accounts.where((a) => a.id == lastAcctId && !a.isArchived).firstOrNull;
+      if (acct != null) setState(() => _accountId = lastAcctId);
     }
 
-    // 4. 恢复转账转入账户
-    if (lastToAcctId != null && _recordType == 'transfer' && lastToAcctId != _accountId) {
+    if (lastToAcctId != null &&
+        _recordType == 'transfer' &&
+        lastToAcctId != _accountId) {
       final toAcct = _accounts
           .where((a) => a.id == lastToAcctId && !a.isArchived)
           .firstOrNull;
-      if (toAcct != null) {
-        setState(() => _toAccountId = lastToAcctId);
-      }
+      if (toAcct != null) setState(() => _toAccountId = lastToAcctId);
     }
   }
 
@@ -880,148 +712,406 @@ class _RecordScreenState extends ConsumerState<RecordScreen> {
     final picked = await showDatePicker(
       context: context,
       initialDate: _occurredAt,
-      firstDate: DateTime.now().subtract(const Duration(days: AppConstants.maxBackdateDays)),
+      firstDate: DateTime.now()
+          .subtract(const Duration(days: AppConstants.maxBackdateDays)),
       lastDate: DateTime.now(),
       helpText: '选择记账日期',
     );
-    if (picked != null) {
-      setState(() => _occurredAt = picked);
-    }
+    if (picked != null) setState(() => _occurredAt = picked);
   }
 
-  // ═════════════════════════════════════════════════════════
+  // ─────────────────────────────────────────────
   // Build
-  // ═════════════════════════════════════════════════════════
+  // ─────────────────────────────────────────────
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
 
-    return PopScope(
-      canPop: !_showNumpad,
-      onPopInvokedWithResult: (didPop, result) {
-        if (!didPop && _showNumpad) {
-          setState(() => _showNumpad = false);
-        }
-      },
-      child: Scaffold(
-        appBar: AppBar(
-          title: Text(_isBatchMode || _isEditMode ? '编辑账单' : '记一笔'),
-          actions: _isBatchMode
-              ? null
-              : [
-                  IconButton(
-                    icon: const Icon(Icons.auto_awesome),
-                    tooltip: 'AI 智能记账',
-                    onPressed: _showAiDialog,
+    return Scaffold(
+      // 键盘始终显示，不随系统键盘（备注弹窗）压缩
+      resizeToAvoidBottomInset: false,
+      appBar: AppBar(
+        title: Text(_isBatchMode || _isEditMode ? '编辑账单' : '记一笔'),
+      ),
+      body: SafeArea(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            // ── 1. 类型 Tab ──
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 6, 16, 0),
+              child: SegmentedButton<String>(
+                segments: const [
+                  ButtonSegment(
+                    value: 'expense',
+                    label: Text('支出'),
+                    icon: Icon(Icons.arrow_upward_rounded, size: 15),
+                  ),
+                  ButtonSegment(
+                    value: 'income',
+                    label: Text('收入'),
+                    icon: Icon(Icons.arrow_downward_rounded, size: 15),
+                  ),
+                  ButtonSegment(
+                    value: 'transfer',
+                    label: Text('转账'),
+                    icon: Icon(Icons.swap_horiz_rounded, size: 15),
                   ),
                 ],
+                selected: {_recordType},
+                onSelectionChanged: (sel) {
+                  final t = sel.first;
+                  if (t != _recordType) _onTypeChanged(t);
+                },
+                style: SegmentedButton.styleFrom(
+                  visualDensity: VisualDensity.compact,
+                ),
+              ),
+            ),
+
+            // ── 2. 金额大字区 ──
+            _AmountDisplay(
+              amount: _amount,
+              recordType: _recordType,
+              theme: theme,
+              showSuccess: _showSuccess,
+            ),
+
+            // ── 3. 分类横向滑动 OR 紧凑转账选择器 ──
+            if (_recordType != 'transfer')
+              _HorizontalCategoryRow(
+                categories: _recentLeafCategories,
+                selectedSubId: _subcategoryId,
+                loading: _categoriesLoading,
+                scrollController: _categoryScrollCtrl,
+                onSelect: (cat) {
+                  setState(() {
+                    _subcategoryId = cat.id;
+                    _categoryId = cat.parentId;
+                  });
+                  HapticFeedback.selectionClick();
+                },
+                onMoreTap: _showCategoryPicker,
+              )
+            else
+              _CompactTransferBar(
+                accounts: _accounts,
+                fromId: _accountId,
+                toId: _toAccountId,
+                onFromTap: _showFromAccountPicker,
+                onToTap: _showToAccountPicker,
+              ),
+
+            // ── 4. 辅助信息行（账户 / 日期 / 备注）──
+            _InfoChipsRow(
+              accountName: _recordType != 'transfer'
+                  ? (_selectedAccountName ?? '选择账户')
+                  : null,
+              accountHasValue: _accountId != null,
+              date: _occurredAt,
+              note: _note,
+              onAccountTap:
+                  _recordType != 'transfer' ? _showAccountPicker : null,
+              onDateTap: _pickDate,
+              onNoteTap: _showNoteSheet,
+            ),
+
+            const Spacer(),
+
+            // ── 5. 数字键盘（常驻底部）──
+            _Numpad(
+              onKeyTap: _onKeyTap,
+              isSubmitting: _isSubmitting,
+              isEditMode: _isEditMode || _isBatchMode,
+            ),
+          ],
         ),
-        body: SafeArea(
-          child: Column(
-            children: [
-              // ── 金额显示区 ──
-              _AmountDisplay(
-                amount: _amount,
-                recordType: _recordType,
-                theme: theme,
-                onTap: () => setState(() => _showNumpad = true),
-              ),
+      ),
+    );
+  }
+}
 
-              // ── 类型 Tab ──
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-                child: SegmentedButton<String>(
-                  segments: const [
-                    ButtonSegment(value: 'expense', label: Text('支出'), icon: Icon(Icons.shopping_cart_outlined)),
-                    ButtonSegment(value: 'income', label: Text('收入'), icon: Icon(Icons.payments_outlined)),
-                    ButtonSegment(value: 'transfer', label: Text('转账'), icon: Icon(Icons.swap_horiz)),
-                  ],
-                  selected: {_recordType},
-                  onSelectionChanged: (sel) => _onTypeChanged(sel.first),
+// ═══════════════════════════════════════════════════════════════
+// 金额显示区（重新设计：大字号 + 颜色背景）
+// ═══════════════════════════════════════════════════════════════
+
+class _AmountDisplay extends StatelessWidget {
+  final String amount;
+  final String recordType;
+  final ThemeData theme;
+  final bool showSuccess;
+
+  const _AmountDisplay({
+    required this.amount,
+    required this.recordType,
+    required this.theme,
+    this.showSuccess = false,
+  });
+
+  Color get _typeColor {
+    return recordType == 'income'
+        ? theme.colorScheme.primary
+        : recordType == 'transfer'
+            ? theme.colorScheme.secondary
+            : theme.colorScheme.error;
+  }
+
+  String get _prefix {
+    return recordType == 'income'
+        ? '+'
+        : recordType == 'transfer'
+            ? ''
+            : '-';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final color = _typeColor;
+    final isEmpty = amount.isEmpty;
+
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 200),
+      height: 82,
+      margin: const EdgeInsets.fromLTRB(16, 10, 16, 0),
+      decoration: BoxDecoration(
+        color: color.withAlpha(isEmpty ? 8 : 14),
+        borderRadius: BorderRadius.circular(16),
+      ),
+      alignment: Alignment.center,
+      child: AnimatedSwitcher(
+        duration: const Duration(milliseconds: 250),
+        switchInCurve: Curves.easeOutBack,
+        switchOutCurve: Curves.easeIn,
+        child: showSuccess
+            ? TweenAnimationBuilder<double>(
+                key: const ValueKey('success'),
+                tween: Tween(begin: 0.0, end: 1.0),
+                duration: const Duration(milliseconds: 320),
+                curve: Curves.easeOutBack,
+                builder: (_, v, child) => Transform.scale(
+                  scale: v,
+                  child: Container(
+                    width: 48,
+                    height: 48,
+                    decoration: BoxDecoration(
+                      color: theme.colorScheme.primary,
+                      shape: BoxShape.circle,
+                    ),
+                    child: const Icon(Icons.check_rounded,
+                        color: Colors.white, size: 28),
+                  ),
                 ),
-              ),
-              const SizedBox(height: 8),
-
-              // ── 表单区域（可滚动）──
-              Expanded(
-                child: SingleChildScrollView(
-                  keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
-                  padding: const EdgeInsets.symmetric(horizontal: 16),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      // 日期快捷选择
-                      _DateRow(date: _occurredAt, onTap: _pickDate, onToday: () => setState(() => _occurredAt = DateTime.now())),
-                      const SizedBox(height: 16),
-
-                      // 分类选择（B3：内联网格，最近使用 8 个直接可见，末尾「更多」打开完整列表）
-                      if (_recordType != 'transfer') ...[
-                        _InlineCategoryGrid(
-                          categories: _recentLeafCategories,
-                          selectedSubId: _subcategoryId,
-                          onSelectCategory: (cat) {
-                            setState(() {
-                              _subcategoryId = cat.id;
-                              _categoryId = cat.parentId;
-                            });
-                            HapticFeedback.selectionClick();
-                          },
-                          onMoreTap: _showCategoryPicker,
-                        ),
-                      ] else ...[
-                        _TransferAccountSelector(
-                          accounts: _accounts,
-                          fromId: _accountId,
-                          toId: _toAccountId,
-                          onFromChanged: (id) => setState(() => _accountId = id),
-                          onToChanged: (id) => setState(() => _toAccountId = id),
-                        ),
-                      ],
-
-                      const SizedBox(height: 12),
-
-                      // 账户选择（非转账）—— 点击弹出底部弹窗
-                      if (_recordType != 'transfer') ...[
-                        _PickerField(
-                          label: '选择账户',
-                          selectedName: _selectedAccountName,
-                          icon: Icons.account_balance_wallet_outlined,
-                          onTap: _showAccountPicker,
-                        ),
-                        const SizedBox(height: 8),
-                      ],
-
-                      // 备注（B7：浮动 label 取代纯 placeholder，解决输入后无标签的 UX 反模式）
-                      TextField(
-                        decoration: const InputDecoration(
-                          labelText: '备注',
-                          hintText: '选填，描述这笔支出',
-                          prefixIcon: Icon(Icons.notes_outlined),
-                          border: OutlineInputBorder(),
-                          contentPadding: EdgeInsets.symmetric(horizontal: 12, vertical: 12),
-                        ),
-                        controller: _noteController,
-                        onChanged: (v) => _note = v,
+              )
+            : Padding(
+                key: const ValueKey('amount'),
+                padding: const EdgeInsets.symmetric(horizontal: 16),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  crossAxisAlignment: CrossAxisAlignment.baseline,
+                  textBaseline: TextBaseline.alphabetic,
+                  children: [
+                    Text(
+                      isEmpty ? '¥' : '$_prefix¥',
+                      style: TextStyle(
+                        fontSize: 22,
+                        fontWeight: FontWeight.w300,
+                        color: isEmpty
+                            ? theme.colorScheme.onSurfaceVariant.withAlpha(80)
+                            : color,
+                        letterSpacing: -0.5,
                       ),
-                      const SizedBox(height: 8),
-                    ],
-                  ),
+                    ),
+                    const SizedBox(width: 2),
+                    Text(
+                      isEmpty ? '0' : amount,
+                      style: TextStyle(
+                        fontSize: 52,
+                        fontWeight: FontWeight.w300,
+                        letterSpacing: -2,
+                        color: isEmpty
+                            ? theme.colorScheme.onSurfaceVariant.withAlpha(80)
+                            : color,
+                        fontFeatures: const [FontFeature.tabularFigures()],
+                        height: 1,
+                      ),
+                    ),
+                  ],
                 ),
               ),
+      ),
+    );
+  }
+}
 
-              // ── 数字键盘（B6：AnimatedAlign 高度折叠动画，easeOutCubic 滑入）──
-              ClipRect(
-                child: AnimatedAlign(
-                  alignment: Alignment.topCenter,
-                  heightFactor: _showNumpad ? 1.0 : 0.0,
-                  duration: const Duration(milliseconds: 300),
-                  curve: Curves.easeOutCubic,
-                  child: _Numpad(
-                    onKeyTap: _onKeyTap,
-                    isSubmitting: _isSubmitting,
-                    isEditMode: _isEditMode || _isBatchMode,
+// ═══════════════════════════════════════════════════════════════
+// 分类横向滑动行（替代原 Wrap 网格）
+// ═══════════════════════════════════════════════════════════════
+
+class _HorizontalCategoryRow extends StatelessWidget {
+  final List<Category> categories;
+  final String? selectedSubId;
+  final bool loading;
+  final ValueChanged<Category> onSelect;
+  final VoidCallback onMoreTap;
+  final ScrollController? scrollController;
+
+  const _HorizontalCategoryRow({
+    required this.categories,
+    required this.selectedSubId,
+    required this.loading,
+    required this.onSelect,
+    required this.onMoreTap,
+    this.scrollController,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    if (loading && categories.isEmpty) {
+      return SizedBox(
+        height: 86,
+        child: ListView.builder(
+          scrollDirection: Axis.horizontal,
+          padding: const EdgeInsets.fromLTRB(16, 10, 16, 4),
+          itemCount: 6,
+          itemBuilder: (_, i) => _SkeletonCategoryChip(marginRight: i < 5 ? 8 : 0),
+        ),
+      );
+    }
+
+    if (categories.isEmpty) {
+      return Padding(
+        padding: const EdgeInsets.fromLTRB(16, 10, 16, 4),
+        child: SizedBox(
+          height: 72,
+          child: OutlinedButton.icon(
+            icon: const Icon(Icons.add, size: 18),
+            label: const Text('新建分类'),
+            onPressed: onMoreTap,
+          ),
+        ),
+      );
+    }
+
+    return SizedBox(
+      height: 86,
+      child: ListView.builder(
+        controller: scrollController,
+        scrollDirection: Axis.horizontal,
+        padding: const EdgeInsets.fromLTRB(16, 10, 16, 4),
+        itemCount: categories.length + 1, // +1 for 更多
+        itemBuilder: (context, index) {
+          if (index == categories.length) {
+            return _MoreCategoryChip(onTap: onMoreTap);
+          }
+          final cat = categories[index];
+          return Padding(
+            padding: const EdgeInsets.only(right: 8),
+            child: _ChildCategoryChip(
+              name: cat.name,
+              icon: _iconForCategory(cat.name, dbIcon: cat.icon),
+              selected: selectedSubId == cat.id,
+              onTap: () => onSelect(cat),
+            ),
+          );
+        },
+      ),
+    );
+  }
+}
+
+class _SkeletonCategoryChip extends StatelessWidget {
+  final double marginRight;
+  const _SkeletonCategoryChip({this.marginRight = 0});
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Container(
+      width: 64,
+      height: 72,
+      margin: EdgeInsets.only(right: marginRight),
+      decoration: BoxDecoration(
+        color: theme.colorScheme.surfaceContainerHighest.withAlpha(50),
+        borderRadius: BorderRadius.circular(12),
+      ),
+    );
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// 辅助信息行（账户 / 日期 / 备注）
+// ═══════════════════════════════════════════════════════════════
+
+class _InfoChipsRow extends StatelessWidget {
+  final String? accountName; // null = 转账模式，不显示账户
+  final bool accountHasValue;
+  final DateTime date;
+  final String note;
+  final VoidCallback? onAccountTap;
+  final VoidCallback onDateTap;
+  final VoidCallback onNoteTap;
+
+  const _InfoChipsRow({
+    required this.accountName,
+    required this.accountHasValue,
+    required this.date,
+    required this.note,
+    required this.onAccountTap,
+    required this.onDateTap,
+    required this.onNoteTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final now = DateTime.now();
+    final isToday = date.year == now.year &&
+        date.month == now.month &&
+        date.day == now.day;
+    final dateLabel = isToday ? '今天' : '${date.month}/${date.day}';
+    final noteLabel = note.isEmpty
+        ? '备注'
+        : (note.length > 10 ? '${note.substring(0, 10)}…' : note);
+
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+      child: Container(
+        height: 44,
+        decoration: BoxDecoration(
+          color: theme.colorScheme.surfaceContainerLow,
+          borderRadius: BorderRadius.circular(12),
+        ),
+        child: IntrinsicHeight(
+          child: Row(
+            children: [
+              // 账户（转账模式隐藏）
+              if (accountName != null) ...[
+                Expanded(
+                  child: _InfoChip(
+                    icon: Icons.account_balance_wallet_outlined,
+                    label: accountName!,
+                    hasValue: accountHasValue,
+                    onTap: onAccountTap ?? () {},
                   ),
+                ),
+                _InfoDivider(),
+              ],
+              // 日期
+              _InfoChip(
+                icon: Icons.calendar_today_outlined,
+                label: dateLabel,
+                hasValue: !isToday,
+                onTap: onDateTap,
+              ),
+              _InfoDivider(),
+              // 备注
+              Expanded(
+                child: _InfoChip(
+                  icon: Icons.notes_outlined,
+                  label: noteLabel,
+                  hasValue: note.isNotEmpty,
+                  onTap: onNoteTap,
                 ),
               ),
             ],
@@ -1032,47 +1122,61 @@ class _RecordScreenState extends ConsumerState<RecordScreen> {
   }
 }
 
-// ═══════════════════════════════════════════════════════════════
-// 金额显示
-// ═══════════════════════════════════════════════════════════════
+class _InfoDivider extends StatelessWidget {
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: 1,
+      margin: const EdgeInsets.symmetric(vertical: 10),
+      color: Theme.of(context).colorScheme.outline.withAlpha(50),
+    );
+  }
+}
 
-class _AmountDisplay extends StatelessWidget {
-  final String amount;
-  final String recordType;
-  final ThemeData theme;
-  final VoidCallback? onTap;
+class _InfoChip extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final bool hasValue;
+  final VoidCallback onTap;
 
-  const _AmountDisplay({
-    required this.amount,
-    required this.recordType,
-    required this.theme,
-    this.onTap,
+  const _InfoChip({
+    required this.icon,
+    required this.label,
+    required this.hasValue,
+    required this.onTap,
   });
 
   @override
   Widget build(BuildContext context) {
-    final prefix = recordType == 'income' ? '+' : recordType == 'transfer' ? '↔ ' : '-';
-    final color = recordType == 'income'
+    final theme = Theme.of(context);
+    final color = hasValue
         ? theme.colorScheme.primary
-        : recordType == 'transfer'
-            ? theme.colorScheme.secondary
-            : theme.colorScheme.error;
-    final displayAmount = amount.isEmpty ? '0' : amount;
+        : theme.colorScheme.onSurfaceVariant;
 
-    return GestureDetector(
+    return InkWell(
       onTap: onTap,
-      behavior: HitTestBehavior.opaque,
+      borderRadius: BorderRadius.circular(12),
       child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-        child: Text(
-          '$prefix¥ $displayAmount',
-          textAlign: TextAlign.center,
-          style: TextStyle(
-            fontSize: 42,
-            fontWeight: FontWeight.w300,
-            letterSpacing: -1,
-            color: amount.isEmpty ? theme.colorScheme.onSurfaceVariant.withAlpha(128) : color,
-          ),
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, size: 13, color: color),
+            const SizedBox(width: 4),
+            Flexible(
+              child: Text(
+                label,
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: color,
+                  fontWeight:
+                      hasValue ? FontWeight.w500 : FontWeight.w400,
+                ),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+          ],
         ),
       ),
     );
@@ -1080,122 +1184,139 @@ class _AmountDisplay extends StatelessWidget {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// 日期行
+// 紧凑转账选择器
 // ═══════════════════════════════════════════════════════════════
 
-class _DateRow extends StatelessWidget {
-  final DateTime date;
-  final VoidCallback onTap;
-  final VoidCallback onToday;
+class _CompactTransferBar extends StatelessWidget {
+  final List<Account> accounts;
+  final String? fromId;
+  final String? toId;
+  final VoidCallback onFromTap;
+  final VoidCallback onToTap;
 
-  const _DateRow({required this.date, required this.onTap, required this.onToday});
-
-  @override
-  Widget build(BuildContext context) {
-    final now = DateTime.now();
-    final isToday = date.year == now.year && date.month == now.month && date.day == now.day;
-    final label = isToday ? '今天' : '${date.month}/${date.day}';
-
-    return Row(
-      children: [
-        Icon(Icons.calendar_today_outlined, size: 16, color: Theme.of(context).colorScheme.onSurfaceVariant),
-        const SizedBox(width: 6),
-        InkWell(
-          onTap: onTap,
-          borderRadius: BorderRadius.circular(4),
-          child: Padding(
-            // 上下 padding 使点击区达到 ~44pt（文字 ~14px + 各 15px）
-            padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 4),
-            child: Text(
-              label,
-              style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                    decoration: TextDecoration.underline,
-                    decorationStyle: TextDecorationStyle.dotted,
-                  ),
-            ),
-          ),
-        ),
-        if (!isToday) ...[
-          const SizedBox(width: 8),
-          TextButton.icon(
-            icon: const Icon(Icons.today, size: 14),
-            label: const Text('今天', style: TextStyle(fontSize: 12)),
-            style: TextButton.styleFrom(visualDensity: VisualDensity.compact),
-            onPressed: onToday,
-          ),
-        ],
-      ],
-    );
-  }
-}
-
-// ═══════════════════════════════════════════════════════════════
-// 通用选择器输入框（点击弹出底部弹窗）
-// ═══════════════════════════════════════════════════════════════
-
-class _PickerField extends StatelessWidget {
-  final String label;
-  final String? selectedName;
-  final IconData icon;
-  final VoidCallback onTap;
-
-  const _PickerField({
-    required this.label,
-    required this.selectedName,
-    required this.icon,
-    required this.onTap,
+  const _CompactTransferBar({
+    required this.accounts,
+    required this.fromId,
+    required this.toId,
+    required this.onFromTap,
+    required this.onToTap,
   });
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final hasSelection = selectedName != null;
+    final fromAcct = accounts.where((a) => a.id == fromId).firstOrNull;
+    final toAcct = accounts.where((a) => a.id == toId).firstOrNull;
 
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text(label, style: theme.textTheme.titleSmall),
-        const SizedBox(height: 8),
-        InkWell(
-          onTap: onTap,
-          borderRadius: BorderRadius.circular(12),
-          child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 14),
-            decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(12),
-              border: Border.all(
-                color: hasSelection
-                    ? theme.colorScheme.primary
-                    : theme.colorScheme.outline,
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 10, 16, 0),
+      child: SizedBox(
+        height: 56,
+        child: Row(
+          children: [
+            Expanded(
+              child: _TransferAccountTile(
+                account: fromAcct,
+                placeholder: '转出账户',
+                onTap: onFromTap,
+                theme: theme,
               ),
-              color: hasSelection
-                  ? theme.colorScheme.primaryContainer.withAlpha(40)
-                  : null,
             ),
-            child: Row(
-              children: [
-                Icon(icon, size: 20, color: hasSelection ? theme.colorScheme.primary : theme.colorScheme.onSurfaceVariant),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: Text(
-                    selectedName ?? '请选择',
-                    style: theme.textTheme.bodyLarge?.copyWith(
-                      color: hasSelection ? theme.colorScheme.onSurface : theme.colorScheme.onSurfaceVariant,
-                    ),
-                  ),
-                ),
-                Icon(Icons.chevron_right, color: theme.colorScheme.onSurfaceVariant),
-              ],
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 10),
+              child: Icon(
+                Icons.arrow_forward_rounded,
+                color: theme.colorScheme.secondary,
+                size: 22,
+              ),
             ),
-          ),
+            Expanded(
+              child: _TransferAccountTile(
+                account: toAcct,
+                placeholder: '转入账户',
+                onTap: onToTap,
+                theme: theme,
+              ),
+            ),
+          ],
         ),
-      ],
+      ),
+    );
+  }
+}
+
+class _TransferAccountTile extends StatelessWidget {
+  final Account? account;
+  final String placeholder;
+  final VoidCallback onTap;
+  final ThemeData theme;
+
+  const _TransferAccountTile({
+    required this.account,
+    required this.placeholder,
+    required this.onTap,
+    required this.theme,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final hasAccount = account != null;
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(12),
+      child: Container(
+        height: 56,
+        decoration: BoxDecoration(
+          color: hasAccount
+              ? theme.colorScheme.secondaryContainer.withAlpha(60)
+              : theme.colorScheme.surfaceContainerHighest.withAlpha(50),
+          borderRadius: BorderRadius.circular(12),
+          border: hasAccount
+              ? Border.all(color: theme.colorScheme.secondary, width: 1.5)
+              : Border.all(
+                  color: theme.colorScheme.outline.withAlpha(80), width: 1),
+        ),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            if (hasAccount) ...[
+              Icon(
+                _accountTypeIcon(account!.type),
+                size: 15,
+                color: theme.colorScheme.secondary,
+              ),
+              const SizedBox(width: 5),
+            ],
+            Flexible(
+              child: Text(
+                hasAccount ? account!.name : placeholder,
+                style: TextStyle(
+                  fontSize: 14,
+                  fontWeight:
+                      hasAccount ? FontWeight.w600 : FontWeight.w400,
+                  color: hasAccount
+                      ? theme.colorScheme.secondary
+                      : theme.colorScheme.onSurfaceVariant,
+                ),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+            const SizedBox(width: 4),
+            Icon(
+              Icons.expand_more_rounded,
+              size: 16,
+              color: theme.colorScheme.onSurfaceVariant.withAlpha(150),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }
 
 // ═══════════════════════════════════════════════════════════════
-// 分类选择底部弹窗
+// 分类选择底部弹窗（保留原逻辑）
 // ═══════════════════════════════════════════════════════════════
 
 class _CategoryPickerSheet extends StatefulWidget {
@@ -1240,7 +1361,6 @@ class _CategoryPickerSheetState extends State<_CategoryPickerSheet> {
               borderRadius: BorderRadius.circular(2),
             ),
           ),
-          // B8: 显式关闭按钮，支持无障碍访问（VoiceOver/TalkBack）
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 16),
             child: Row(
@@ -1263,9 +1383,12 @@ class _CategoryPickerSheetState extends State<_CategoryPickerSheet> {
                     child: Column(
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                        Icon(Icons.category_outlined, size: 48, color: theme.colorScheme.outline),
+                        Icon(Icons.category_outlined,
+                            size: 48,
+                            color: theme.colorScheme.outline),
                         const SizedBox(height: 12),
-                        Text('暂无分类，请创建', style: theme.textTheme.bodyMedium),
+                        Text('暂无分类，请创建',
+                            style: theme.textTheme.bodyMedium),
                       ],
                     ),
                   )
@@ -1275,10 +1398,12 @@ class _CategoryPickerSheetState extends State<_CategoryPickerSheet> {
                     itemCount: widget.parentCategories.length,
                     itemBuilder: (context, index) {
                       final parent = widget.parentCategories[index];
-                      final children = widget.childrenByParent[parent.id] ?? [];
+                      final children =
+                          widget.childrenByParent[parent.id] ?? [];
                       return _CategoryGroup(
                         parentName: parent.name,
-                        parentIcon: _iconForCategory(parent.name, dbIcon: parent.icon),
+                        parentIcon: _iconForCategory(parent.name,
+                            dbIcon: parent.icon),
                         children: children,
                         selectedSubId: widget.selectedSubId,
                         onSelectChild: widget.onSelectChild,
@@ -1288,7 +1413,8 @@ class _CategoryPickerSheetState extends State<_CategoryPickerSheet> {
           ),
           const Divider(height: 1),
           Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+            padding:
+                const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
             child: SizedBox(
               width: double.infinity,
               child: OutlinedButton.icon(
@@ -1316,7 +1442,7 @@ class _CategoryPickerSheetState extends State<_CategoryPickerSheet> {
   }
 }
 
-/// 分类弹窗内直接新建分类的对话框
+/// 分类弹窗内新建分类对话框
 class _CreateCategoryDialog extends StatefulWidget {
   final String recordType;
   final List<Category> parentCategories;
@@ -1355,23 +1481,19 @@ class _CreateCategoryDialogState extends State<_CreateCategoryDialog> {
       content: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          // ── 父分类选择 ──
           DropdownButtonFormField<String?>(
             value: _isNewParent ? null : _selectedParentId,
             decoration: const InputDecoration(
               labelText: '所属父分类',
               border: OutlineInputBorder(),
-              contentPadding: EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+              contentPadding:
+                  EdgeInsets.symmetric(horizontal: 12, vertical: 12),
             ),
             items: [
-              ...widget.parentCategories.map((p) => DropdownMenuItem(
-                    value: p.id,
-                    child: Text(p.name),
-                  )),
+              ...widget.parentCategories.map((p) =>
+                  DropdownMenuItem(value: p.id, child: Text(p.name))),
               const DropdownMenuItem(
-                value: null,
-                child: Text('+ 新建一级分类'),
-              ),
+                  value: null, child: Text('+ 新建一级分类')),
             ],
             onChanged: (val) {
               setState(() {
@@ -1386,24 +1508,24 @@ class _CreateCategoryDialogState extends State<_CreateCategoryDialog> {
             },
           ),
           const SizedBox(height: 12),
-          // ── 新建一级分类名称（仅当选择「新建」时显示）──
           if (_isNewParent)
             TextField(
               controller: _parentNameCtrl,
               decoration: const InputDecoration(
                 labelText: '一级分类名称',
                 border: OutlineInputBorder(),
-                contentPadding: EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+                contentPadding:
+                    EdgeInsets.symmetric(horizontal: 12, vertical: 12),
               ),
             ),
           if (_isNewParent) const SizedBox(height: 12),
-          // ── 子分类名称 ──
           TextField(
             controller: _childNameCtrl,
             decoration: InputDecoration(
               labelText: _isNewParent ? '二级分类名称（可留空）' : '分类名称',
               border: const OutlineInputBorder(),
-              contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+              contentPadding:
+                  const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
             ),
           ),
         ],
@@ -1416,7 +1538,10 @@ class _CreateCategoryDialogState extends State<_CreateCategoryDialog> {
         FilledButton(
           onPressed: _isCreating ? null : _doCreate,
           child: _isCreating
-              ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2))
+              ? const SizedBox(
+                  width: 20,
+                  height: 20,
+                  child: CircularProgressIndicator(strokeWidth: 2))
               : const Text('创建'),
         ),
       ],
@@ -1427,13 +1552,12 @@ class _CreateCategoryDialogState extends State<_CreateCategoryDialog> {
     final childName = _childNameCtrl.text.trim();
     final parentName = _parentNameCtrl.text.trim();
 
-    // 验证
     if (childName.isEmpty && !_isNewParent) {
-      _showSnack('请输入分类名称');
+      SnackbarUtils.show(context: context, message: '请输入分类名称');
       return;
     }
     if (_isNewParent && parentName.isEmpty && childName.isEmpty) {
-      _showSnack('请输入分类名称');
+      SnackbarUtils.show(context: context, message: '请输入分类名称');
       return;
     }
 
@@ -1447,9 +1571,8 @@ class _CreateCategoryDialogState extends State<_CreateCategoryDialog> {
       final kind = widget.recordType;
 
       String? actualParentId = _isNewParent ? null : _selectedParentId;
-      String? createdId; // 最终需要选中的分类 ID
+      String? createdId;
 
-      // 情况 2/3：新建一级分类
       if (_isNewParent && parentName.isNotEmpty) {
         final parentCatId = IdGenerator.generate();
         await dao.insertCategory(CategoriesCompanion(
@@ -1465,15 +1588,18 @@ class _CreateCategoryDialogState extends State<_CreateCategoryDialog> {
           tableName: 'categories',
           recordId: parentCatId,
           payload: jsonEncode({
-            'id': parentCatId, 'name': parentName, 'parent_id': null,
-            'icon': 'category', 'kind': kind, 'is_archived': false,
+            'id': parentCatId,
+            'name': parentName,
+            'parent_id': null,
+            'icon': 'category',
+            'kind': kind,
+            'is_archived': false,
           }),
         );
         actualParentId = parentCatId;
         if (childName.isEmpty) createdId = parentCatId;
       }
 
-      // 创建子分类（或其下无父分类时直接创建）
       if (childName.isNotEmpty) {
         final childCatId = IdGenerator.generate();
         await dao.insertCategory(CategoriesCompanion(
@@ -1489,8 +1615,12 @@ class _CreateCategoryDialogState extends State<_CreateCategoryDialog> {
           tableName: 'categories',
           recordId: childCatId,
           payload: jsonEncode({
-            'id': childCatId, 'name': childName, 'parent_id': actualParentId,
-            'icon': 'category', 'kind': kind, 'is_archived': false,
+            'id': childCatId,
+            'name': childName,
+            'parent_id': actualParentId,
+            'icon': 'category',
+            'kind': kind,
+            'is_archived': false,
           }),
         );
         createdId = childCatId;
@@ -1499,23 +1629,14 @@ class _CreateCategoryDialogState extends State<_CreateCategoryDialog> {
       syncQueue.processQueue().catchError((_) {});
 
       if (!mounted) return;
-
-      // 通知父组件刷新并自动选中
-      if (createdId != null) {
-        widget.onCreated(createdId);
-      }
-
-      Navigator.of(context).pop(); // 关闭创建 Dialog
+      if (createdId != null) widget.onCreated(createdId);
+      Navigator.of(context).pop();
     } catch (e) {
       if (mounted) {
         setState(() => _isCreating = false);
-        _showSnack('创建失败: $e');
+        SnackbarUtils.show(context: context, message: '创建失败: $e');
       }
     }
-  }
-
-  void _showSnack(String msg) {
-    SnackbarUtils.show(context: context, message: msg);
   }
 }
 
@@ -1537,13 +1658,11 @@ class _CategoryGroup extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-
     return Padding(
       padding: const EdgeInsets.only(bottom: 16),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // 一级分类标题
           Row(
             children: [
               Icon(parentIcon, size: 20, color: theme.colorScheme.primary),
@@ -1558,7 +1677,6 @@ class _CategoryGroup extends StatelessWidget {
             ],
           ),
           const SizedBox(height: 10),
-          // 二级分类网格：4 列
           Wrap(
             spacing: 8,
             runSpacing: 8,
@@ -1578,7 +1696,10 @@ class _CategoryGroup extends StatelessWidget {
   }
 }
 
-// B5：转为 StatefulWidget，添加按压缩放微动效（0.93 scale on press）
+// ═══════════════════════════════════════════════════════════════
+// 分类芯片（横向滑动 + 弹窗内共用）
+// ═══════════════════════════════════════════════════════════════
+
 class _ChildCategoryChip extends StatefulWidget {
   final String name;
   final IconData icon;
@@ -1596,13 +1717,41 @@ class _ChildCategoryChip extends StatefulWidget {
   State<_ChildCategoryChip> createState() => _ChildCategoryChipState();
 }
 
-class _ChildCategoryChipState extends State<_ChildCategoryChip> {
+class _ChildCategoryChipState extends State<_ChildCategoryChip>
+    with SingleTickerProviderStateMixin {
   bool _pressed = false;
+  late final AnimationController _bounceCtrl;
+  late final Animation<double> _bounceAnim;
+
+  @override
+  void initState() {
+    super.initState();
+    _bounceCtrl = AnimationController(
+        duration: const Duration(milliseconds: 320), vsync: this);
+    _bounceAnim = TweenSequence<double>([
+      TweenSequenceItem(tween: Tween(begin: 1.0, end: 1.18), weight: 4),
+      TweenSequenceItem(tween: Tween(begin: 1.18, end: 0.94), weight: 3),
+      TweenSequenceItem(tween: Tween(begin: 0.94, end: 1.0), weight: 3),
+    ]).animate(CurvedAnimation(parent: _bounceCtrl, curve: Curves.easeOut));
+  }
+
+  @override
+  void didUpdateWidget(covariant _ChildCategoryChip oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (!oldWidget.selected && widget.selected) {
+      _bounceCtrl.forward(from: 0);
+    }
+  }
+
+  @override
+  void dispose() {
+    _bounceCtrl.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-
     return GestureDetector(
       onTapDown: (_) => setState(() => _pressed = true),
       onTapUp: (_) {
@@ -1610,17 +1759,23 @@ class _ChildCategoryChipState extends State<_ChildCategoryChip> {
         widget.onTap();
       },
       onTapCancel: () => setState(() => _pressed = false),
-      child: AnimatedScale(
-        scale: _pressed ? 0.93 : 1.0,
-        duration: const Duration(milliseconds: 80),
-        curve: Curves.easeOut,
+      child: AnimatedBuilder(
+        animation: _bounceCtrl,
+        builder: (context, child) {
+          final scale = widget.selected && _bounceCtrl.isAnimating
+              ? _bounceAnim.value
+              : _pressed
+                  ? 0.92
+                  : 1.0;
+          return Transform.scale(scale: scale, child: child);
+        },
         child: Container(
-          width: 72,
-          padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 4),
+          width: 64,
+          padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 2),
           decoration: BoxDecoration(
             color: widget.selected
-                ? theme.colorScheme.primaryContainer.withAlpha(60)
-                : theme.colorScheme.surfaceContainerHighest.withAlpha(40),
+                ? theme.colorScheme.primaryContainer.withAlpha(80)
+                : theme.colorScheme.surfaceContainerHighest.withAlpha(50),
             borderRadius: BorderRadius.circular(12),
             border: widget.selected
                 ? Border.all(color: theme.colorScheme.primary, width: 1.8)
@@ -1631,7 +1786,7 @@ class _ChildCategoryChipState extends State<_ChildCategoryChip> {
             children: [
               Icon(
                 widget.icon,
-                size: 24,
+                size: 22,
                 color: widget.selected
                     ? theme.colorScheme.primary
                     : theme.colorScheme.onSurfaceVariant,
@@ -1640,15 +1795,79 @@ class _ChildCategoryChipState extends State<_ChildCategoryChip> {
               Text(
                 widget.name,
                 style: TextStyle(
-                  fontSize: 12,
-                  fontWeight: widget.selected ? FontWeight.w600 : FontWeight.w500,
+                  fontSize: 11,
+                  fontWeight: widget.selected
+                      ? FontWeight.w600
+                      : FontWeight.w500,
                   color: widget.selected
                       ? theme.colorScheme.primary
                       : theme.colorScheme.onSurface,
+                  height: 1.2,
                 ),
                 textAlign: TextAlign.center,
                 maxLines: 2,
                 overflow: TextOverflow.ellipsis,
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// 「更多」分类芯片
+class _MoreCategoryChip extends StatefulWidget {
+  final VoidCallback onTap;
+  const _MoreCategoryChip({required this.onTap});
+
+  @override
+  State<_MoreCategoryChip> createState() => _MoreCategoryChipState();
+}
+
+class _MoreCategoryChipState extends State<_MoreCategoryChip> {
+  bool _pressed = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return GestureDetector(
+      onTapDown: (_) => setState(() => _pressed = true),
+      onTapUp: (_) {
+        setState(() => _pressed = false);
+        widget.onTap();
+      },
+      onTapCancel: () => setState(() => _pressed = false),
+      child: AnimatedScale(
+        scale: _pressed ? 0.92 : 1.0,
+        duration: const Duration(milliseconds: 80),
+        curve: Curves.easeOut,
+        child: Container(
+          width: 64,
+          padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 2),
+          decoration: BoxDecoration(
+            color: theme.colorScheme.surfaceContainerHighest.withAlpha(50),
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(
+              color: theme.colorScheme.outline.withAlpha(70),
+              width: 1.0,
+            ),
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.more_horiz_rounded,
+                  size: 22,
+                  color: theme.colorScheme.onSurfaceVariant),
+              const SizedBox(height: 4),
+              Text(
+                '更多',
+                style: TextStyle(
+                  fontSize: 11,
+                  fontWeight: FontWeight.w500,
+                  color: theme.colorScheme.onSurfaceVariant,
+                ),
+                textAlign: TextAlign.center,
               ),
             ],
           ),
@@ -1665,18 +1884,19 @@ class _ChildCategoryChipState extends State<_ChildCategoryChip> {
 class _AccountPickerSheet extends StatelessWidget {
   final List<Account> accounts;
   final String? selectedId;
+  final String title;
   final ValueChanged<String> onSelect;
 
   const _AccountPickerSheet({
     required this.accounts,
     required this.selectedId,
+    this.title = '选择账户',
     required this.onSelect,
   });
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-
     return DraggableScrollableSheet(
       initialChildSize: 0.5,
       minChildSize: 0.3,
@@ -1693,13 +1913,12 @@ class _AccountPickerSheet extends StatelessWidget {
               borderRadius: BorderRadius.circular(2),
             ),
           ),
-          // B8: 显式关闭按钮
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 16),
             child: Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
-                Text('选择账户', style: theme.textTheme.titleMedium),
+                Text(title, style: theme.textTheme.titleMedium),
                 IconButton(
                   icon: const Icon(Icons.close),
                   onPressed: () => Navigator.pop(context),
@@ -1716,9 +1935,11 @@ class _AccountPickerSheet extends StatelessWidget {
                     child: Column(
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                        Icon(Icons.account_balance_wallet_outlined, size: 48, color: theme.colorScheme.outline),
+                        Icon(Icons.account_balance_wallet_outlined,
+                            size: 48, color: theme.colorScheme.outline),
                         const SizedBox(height: 12),
-                        Text('暂无可用账户', style: theme.textTheme.bodyMedium),
+                        Text('暂无可用账户',
+                            style: theme.textTheme.bodyMedium),
                       ],
                     ),
                   )
@@ -1729,53 +1950,68 @@ class _AccountPickerSheet extends StatelessWidget {
                     itemBuilder: (context, index) {
                       final acct = accounts[index];
                       final isSelected = selectedId == acct.id;
-                      final icon = _accountTypeIcon(acct.type);
-
                       return Padding(
                         padding: const EdgeInsets.only(bottom: 8),
                         child: InkWell(
                           onTap: () => onSelect(acct.id),
                           borderRadius: BorderRadius.circular(12),
                           child: Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 14, vertical: 12),
                             decoration: BoxDecoration(
                               borderRadius: BorderRadius.circular(12),
                               color: isSelected
-                                  ? theme.colorScheme.primaryContainer.withAlpha(60)
-                                  : theme.colorScheme.surfaceContainerHighest.withAlpha(30),
+                                  ? theme.colorScheme.primaryContainer
+                                      .withAlpha(60)
+                                  : theme.colorScheme.surfaceContainerHighest
+                                      .withAlpha(30),
                               border: isSelected
-                                  ? Border.all(color: theme.colorScheme.primary, width: 1.8)
+                                  ? Border.all(
+                                      color: theme.colorScheme.primary,
+                                      width: 1.8)
                                   : null,
                             ),
                             child: Row(
                               children: [
-                                Icon(icon, size: 24, color: isSelected ? theme.colorScheme.primary : theme.colorScheme.onSurfaceVariant),
+                                Icon(
+                                  _accountTypeIcon(acct.type),
+                                  size: 22,
+                                  color: isSelected
+                                      ? theme.colorScheme.primary
+                                      : theme.colorScheme.onSurfaceVariant,
+                                ),
                                 const SizedBox(width: 12),
                                 Expanded(
                                   child: Text(
                                     acct.name,
                                     style: theme.textTheme.bodyLarge?.copyWith(
-                                      fontWeight: isSelected ? FontWeight.w600 : FontWeight.w400,
-                                      color: isSelected ? theme.colorScheme.primary : theme.colorScheme.onSurface,
+                                      fontWeight: isSelected
+                                          ? FontWeight.w600
+                                          : FontWeight.w400,
+                                      color: isSelected
+                                          ? theme.colorScheme.primary
+                                          : theme.colorScheme.onSurface,
                                     ),
                                   ),
                                 ),
                                 Text(
-                                  '¥ ${acct.balance.toStringAsFixed(2)}',
+                                  '¥ ${acct.balance.toStringAsFixed(0)}',
                                   style: theme.textTheme.bodyMedium?.copyWith(
-                                    color: theme.colorScheme.onSurfaceVariant,
+                                    color:
+                                        theme.colorScheme.onSurfaceVariant,
                                   ),
                                 ),
                                 const SizedBox(width: 8),
                                 if (isSelected)
                                   Container(
-                                    width: 22,
-                                    height: 22,
+                                    width: 20,
+                                    height: 20,
                                     decoration: BoxDecoration(
                                       color: theme.colorScheme.primary,
                                       shape: BoxShape.circle,
                                     ),
-                                    child: const Icon(Icons.check, size: 14, color: Colors.white),
+                                    child: const Icon(Icons.check_rounded,
+                                        size: 13, color: Colors.white),
                                   ),
                               ],
                             ),
@@ -1791,341 +2027,196 @@ class _AccountPickerSheet extends StatelessWidget {
   }
 }
 
-IconData _accountTypeIcon(String type) {
-  switch (type) {
-    case 'cash': return Icons.money;
-    case 'bank': return Icons.account_balance;
-    case 'credit': return Icons.credit_card;
-    case 'loan': return Icons.real_estate_agent;
-    case 'invest': return Icons.trending_up;
-    default: return Icons.more_horiz;
-  }
-}
-
-/// 根据分类名称 + DB icon 字段返回图标
-IconData _iconForCategory(String name, {String? dbIcon}) {
-  return getCategoryIcon(dbIcon: dbIcon, categoryName: name);
-}
-
 // ═══════════════════════════════════════════════════════════════
-// 转账账户选择器
-// ═══════════════════════════════════════════════════════════════
-
-class _TransferAccountSelector extends StatelessWidget {
-  final List<Account> accounts;
-  final String? fromId;
-  final String? toId;
-  final ValueChanged<String> onFromChanged;
-  final ValueChanged<String> onToChanged;
-
-  const _TransferAccountSelector({
-    required this.accounts,
-    required this.fromId,
-    required this.toId,
-    required this.onFromChanged,
-    required this.onToChanged,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-
-    Widget buildAccountCards(List<Account> accts, String? selected, ValueChanged<String> onSel) {
-      if (accts.isEmpty) {
-        return Container(
-          height: 56,
-          decoration: BoxDecoration(
-            color: theme.colorScheme.surfaceContainerHighest.withAlpha(60),
-            borderRadius: BorderRadius.circular(12),
-          ),
-          alignment: Alignment.center,
-          child: Text('暂无可用账户', style: theme.textTheme.bodyMedium),
-        );
-      }
-      return SizedBox(
-        height: 64,
-        child: ListView.builder(
-          scrollDirection: Axis.horizontal,
-          itemCount: accts.length,
-          itemBuilder: (context, index) {
-            final acct = accts[index];
-            final isSel = selected == acct.id;
-            final icon = _accountTypeIcon(acct.type);
-            return Padding(
-              padding: EdgeInsets.only(left: index == 0 ? 0 : 8),
-              child: GestureDetector(
-                onTap: () => onSel(acct.id),
-                child: Container(
-                  width: 96,
-                  decoration: BoxDecoration(
-                    color: isSel
-                        ? theme.colorScheme.primaryContainer
-                        : theme.colorScheme.surfaceContainerHighest.withAlpha(40),
-                    borderRadius: BorderRadius.circular(12),
-                    border: isSel ? Border.all(color: theme.colorScheme.primary, width: 1.5) : null,
-                  ),
-                  child: Column(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      Icon(icon, size: 22, color: isSel ? theme.colorScheme.primary : theme.colorScheme.onSurfaceVariant),
-                      const SizedBox(height: 2),
-                      Text(acct.name, style: TextStyle(fontSize: 12, fontWeight: isSel ? FontWeight.w600 : FontWeight.w400),
-                          maxLines: 1, overflow: TextOverflow.ellipsis),
-                    ],
-                  ),
-                ),
-              ),
-            );
-          },
-        ),
-      );
-    }
-
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text('转出账户', style: theme.textTheme.titleSmall),
-        const SizedBox(height: 8),
-        buildAccountCards(accounts, fromId, onFromChanged),
-        const SizedBox(height: 16),
-        Center(child: Icon(Icons.arrow_downward, color: theme.colorScheme.outline)),
-        const SizedBox(height: 8),
-        Text('转入账户', style: theme.textTheme.titleSmall),
-        const SizedBox(height: 8),
-        buildAccountCards(accounts.where((a) => a.id != fromId).toList(), toId, onToChanged),
-      ],
-    );
-  }
-}
-
-// ═══════════════════════════════════════════════════════════════
-// 数字键盘
+// 数字键盘（精致版）
 // ═══════════════════════════════════════════════════════════════
 
 class _Numpad extends StatelessWidget {
   final void Function(String) onKeyTap;
   final bool isSubmitting;
   final bool isEditMode;
-  const _Numpad({required this.onKeyTap, required this.isSubmitting, this.isEditMode = false});
+
+  const _Numpad({
+    required this.onKeyTap,
+    required this.isSubmitting,
+    this.isEditMode = false,
+  });
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-
     return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+      padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
       child: Column(
+        mainAxisSize: MainAxisSize.min,
         children: [
-          Row(children: [
-            _KeyButton('1', onKeyTap, theme),
-            _KeyButton('2', onKeyTap, theme),
-            _KeyButton('3', onKeyTap, theme),
-          ]),
-          Row(children: [
-            _KeyButton('4', onKeyTap, theme),
-            _KeyButton('5', onKeyTap, theme),
-            _KeyButton('6', onKeyTap, theme),
-          ]),
-          Row(children: [
-            _KeyButton('7', onKeyTap, theme),
-            _KeyButton('8', onKeyTap, theme),
-            _KeyButton('9', onKeyTap, theme),
-          ]),
-          Row(children: [
-            _KeyButton('.', onKeyTap, theme),
-            _KeyButton('0', onKeyTap, theme),
-            Expanded(
-              child: SizedBox(
-                height: 56,
-                child: FilledButton(
-                  onPressed: isSubmitting ? null : () => onKeyTap('完成'),
-                  style: FilledButton.styleFrom(
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                    backgroundColor: theme.colorScheme.primary,
+          // 数字行 1-9
+          _NumRow(keys: const ['1', '2', '3'], onKeyTap: onKeyTap, theme: theme),
+          _NumRow(keys: const ['4', '5', '6'], onKeyTap: onKeyTap, theme: theme),
+          _NumRow(keys: const ['7', '8', '9'], onKeyTap: onKeyTap, theme: theme),
+          // 最后一行：. / 0 / 完成
+          Row(
+            children: [
+              _NumKey('.', onKeyTap, theme),
+              _NumKey('0', onKeyTap, theme),
+              Expanded(
+                child: SizedBox(
+                  height: 52,
+                  child: Padding(
+                    padding: const EdgeInsets.all(3),
+                    child: FilledButton(
+                      onPressed: isSubmitting ? null : () => onKeyTap('完成'),
+                      style: FilledButton.styleFrom(
+                        shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(12)),
+                      ),
+                      child: isSubmitting
+                          ? const SizedBox(
+                              width: 20,
+                              height: 20,
+                              child: CircularProgressIndicator(
+                                  strokeWidth: 2.5, color: Colors.white))
+                          : Text(
+                              isEditMode ? '保存' : '完成',
+                              style: const TextStyle(
+                                  fontSize: 17, fontWeight: FontWeight.w600),
+                            ),
+                    ),
                   ),
-                  child: isSubmitting
-                      ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2))
-                      : Text(isEditMode ? '保存' : '完成',
-                          style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w500)),
                 ),
               ),
-            ),
-          ]),
-          Row(children: [
-            Expanded(
-              child: SizedBox(
-                height: 44, // 原 40 → 44，满足 Apple HIG 最小触摸区域要求
-                child: TextButton(
-                  onPressed: () => onKeyTap('清空'),
-                  style: TextButton.styleFrom(
-                    foregroundColor: theme.colorScheme.error,
+            ],
+          ),
+          // 清空 / 退格
+          Row(
+            children: [
+              Expanded(
+                child: SizedBox(
+                  height: 40,
+                  child: TextButton(
+                    onPressed: () => onKeyTap('清空'),
+                    style: TextButton.styleFrom(
+                      foregroundColor: theme.colorScheme.error.withAlpha(180),
+                      visualDensity: VisualDensity.compact,
+                    ),
+                    child: const Text('清空',
+                        style: TextStyle(
+                            fontSize: 15, fontWeight: FontWeight.w500)),
                   ),
-                  child: const Text('清空', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w500)),
                 ),
               ),
-            ),
-            Expanded(
-              child: SizedBox(
-                height: 44, // 原 40 → 44
-                child: TextButton(
-                  onPressed: () => onKeyTap('⌫'),
-                  child: const Icon(Icons.backspace_outlined),
+              Expanded(
+                child: SizedBox(
+                  height: 40,
+                  child: TextButton(
+                    onPressed: () => onKeyTap('⌫'),
+                    style: TextButton.styleFrom(
+                        visualDensity: VisualDensity.compact),
+                    child: const Icon(Icons.backspace_outlined, size: 20),
+                  ),
                 ),
               ),
-            ),
-          ]),
+            ],
+          ),
         ],
       ),
     );
   }
 }
 
-class _KeyButton extends StatelessWidget {
+class _NumRow extends StatelessWidget {
+  final List<String> keys;
+  final void Function(String) onKeyTap;
+  final ThemeData theme;
+
+  const _NumRow(
+      {required this.keys, required this.onKeyTap, required this.theme});
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: keys.map((k) => _NumKey(k, onKeyTap, theme)).toList(),
+    );
+  }
+}
+
+class _NumKey extends StatefulWidget {
   final String label;
   final void Function(String) onTap;
   final ThemeData theme;
 
-  const _KeyButton(this.label, this.onTap, this.theme);
+  const _NumKey(this.label, this.onTap, this.theme);
+
+  @override
+  State<_NumKey> createState() => _NumKeyState();
+}
+
+class _NumKeyState extends State<_NumKey> {
+  bool _pressed = false;
 
   @override
   Widget build(BuildContext context) {
     return Expanded(
       child: SizedBox(
-        height: 56,
-        child: TextButton(
-          onPressed: () => onTap(label),
-          style: TextButton.styleFrom(
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-          ),
-          child: Text(
-            label,
-            style: theme.textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w400),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-// ═══════════════════════════════════════════════════════════════
-// B3：内联分类网格（替代底部弹窗）
-// ═══════════════════════════════════════════════════════════════
-
-/// 直接嵌入记账页的分类选择网格
-///
-/// 显示最多 8 个最近使用的叶子分类，末尾附「更多」芯片打开完整选择器。
-/// 无需两步（点字段→弹窗），用户一步选中，减少约 80% 点击步骤。
-class _InlineCategoryGrid extends StatelessWidget {
-  final List<Category> categories;
-  final String? selectedSubId;
-  final ValueChanged<Category> onSelectCategory;
-  final VoidCallback onMoreTap;
-
-  const _InlineCategoryGrid({
-    required this.categories,
-    required this.selectedSubId,
-    required this.onSelectCategory,
-    required this.onMoreTap,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text('分类', style: theme.textTheme.titleSmall),
-        const SizedBox(height: 8),
-        if (categories.isEmpty)
-          // 还没有分类时，显示引导按钮
-          SizedBox(
-            width: double.infinity,
-            child: OutlinedButton.icon(
-              icon: const Icon(Icons.add, size: 18),
-              label: const Text('新建分类'),
-              onPressed: onMoreTap,
-            ),
-          )
-        else
-          Wrap(
-            spacing: 8,
-            runSpacing: 8,
-            children: [
-              ...categories.map((cat) => _ChildCategoryChip(
-                    name: cat.name,
-                    icon: _iconForCategory(cat.name, dbIcon: cat.icon),
-                    selected: selectedSubId == cat.id,
-                    onTap: () => onSelectCategory(cat),
-                  )),
-              _MoreCategoryChip(onTap: onMoreTap),
-            ],
-          ),
-      ],
-    );
-  }
-}
-
-/// 「更多」芯片 — 打开完整分类选择器
-class _MoreCategoryChip extends StatefulWidget {
-  final VoidCallback onTap;
-  const _MoreCategoryChip({required this.onTap});
-
-  @override
-  State<_MoreCategoryChip> createState() => _MoreCategoryChipState();
-}
-
-class _MoreCategoryChipState extends State<_MoreCategoryChip> {
-  bool _pressed = false;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-
-    return GestureDetector(
-      onTapDown: (_) => setState(() => _pressed = true),
-      onTapUp: (_) {
-        setState(() => _pressed = false);
-        widget.onTap();
-      },
-      onTapCancel: () => setState(() => _pressed = false),
-      child: AnimatedScale(
-        scale: _pressed ? 0.93 : 1.0,
-        duration: const Duration(milliseconds: 80),
-        curve: Curves.easeOut,
-        child: Container(
-          width: 72,
-          padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 4),
-          decoration: BoxDecoration(
-            color: theme.colorScheme.surfaceContainerHighest.withAlpha(40),
-            borderRadius: BorderRadius.circular(12),
-            border: Border.all(
-              color: theme.colorScheme.outline.withAlpha(80),
-              width: 1.0,
-            ),
-          ),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Icon(
-                Icons.more_horiz,
-                size: 24,
-                color: theme.colorScheme.onSurfaceVariant,
+        height: 52,
+        child: GestureDetector(
+          onTapDown: (_) => setState(() => _pressed = true),
+          onTapUp: (_) {
+            setState(() => _pressed = false);
+            widget.onTap(widget.label);
+          },
+          onTapCancel: () => setState(() => _pressed = false),
+          child: Padding(
+            padding: const EdgeInsets.all(3),
+            child: AnimatedContainer(
+              duration: const Duration(milliseconds: 60),
+              decoration: BoxDecoration(
+                color: _pressed
+                    ? widget.theme.colorScheme.surfaceContainerHighest
+                    : Colors.transparent,
+                borderRadius: BorderRadius.circular(12),
               ),
-              const SizedBox(height: 4),
-              Text(
-                '更多',
+              alignment: Alignment.center,
+              child: Text(
+                widget.label,
                 style: TextStyle(
-                  fontSize: 12,
-                  fontWeight: FontWeight.w500,
-                  color: theme.colorScheme.onSurfaceVariant,
+                  fontSize: 22,
+                  fontWeight: FontWeight.w400,
+                  color: _pressed
+                      ? widget.theme.colorScheme.primary
+                      : widget.theme.colorScheme.onSurface,
+                  fontFeatures: const [FontFeature.tabularFigures()],
                 ),
-                textAlign: TextAlign.center,
               ),
-            ],
+            ),
           ),
         ),
       ),
     );
   }
+}
+
+// ─────────────────────────────────────────────
+// 辅助函数
+// ─────────────────────────────────────────────
+
+IconData _accountTypeIcon(String type) {
+  switch (type) {
+    case 'cash':
+      return Icons.money_rounded;
+    case 'bank':
+      return Icons.account_balance_rounded;
+    case 'credit':
+      return Icons.credit_card_rounded;
+    case 'loan':
+      return Icons.real_estate_agent_rounded;
+    case 'invest':
+      return Icons.trending_up_rounded;
+    default:
+      return Icons.account_balance_wallet_outlined;
+  }
+}
+
+IconData _iconForCategory(String name, {String? dbIcon}) {
+  return getCategoryIcon(dbIcon: dbIcon, categoryName: name);
 }
