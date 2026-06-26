@@ -384,15 +384,22 @@ Future<List<RankingItem>> _getCategoryRankings(
   DateTime end,
 ) async {
   // 按一级分类汇总：二级分类的金额通过 COALESCE 汇总到其父级
+  //
+  // 修复：
+  // 1. 用 INNER JOIN 代替 LEFT JOIN，同时过滤 c.deleted=0，
+  //    确保软删除的分类不进入排行（否则删除后重建同名分类会出现重复行）
+  // 2. WHERE 增加 r.deleted=0，排除已软删除的流水记录
+  // 3. LEFT JOIN parent 仍保留（记录可能直接挂父级分类），
+  //    同时过滤 parent.deleted=0 避免已删父级影响分组名
   final query = db.customSelect(
     '''SELECT COALESCE(parent.name, c.name) as name,
-              COALESCE(SUM(r.amount), 0) as total
+              SUM(r.amount) as total
        FROM records r
-       LEFT JOIN categories c ON r.category_id = c.id
-       LEFT JOIN categories parent ON c.parent_id = parent.id
+       JOIN categories c ON r.category_id = c.id AND c.deleted = 0
+       LEFT JOIN categories parent ON c.parent_id = parent.id AND parent.deleted = 0
        WHERE r.occurred_at >= ? AND r.occurred_at < ?
          AND r.type = 'expense'
-         AND r.category_id IS NOT NULL
+         AND r.deleted = 0
        GROUP BY COALESCE(parent.id, c.id), COALESCE(parent.name, c.name)
        ORDER BY total DESC''',
     variables: [

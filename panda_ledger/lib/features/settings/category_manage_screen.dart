@@ -9,6 +9,7 @@ import '../../core/utils/id_generator.dart';
 import '../../core/utils/snackbar_utils.dart';
 import '../../core/widgets/error_state_widget.dart';
 import '../../core/widgets/shimmer_loading.dart';
+import '../../data/category_dedup_service.dart';
 import '../../data/local/app_database_provider.dart';
 import '../../data/local/database.dart';
 import '../../data/sync/sync_queue_dao_provider.dart';
@@ -17,6 +18,34 @@ import '../auth/auth_provider.dart';
 // activeCategoriesProvider / allCategoriesProvider 已替换为
 // categoriesStreamProvider / allCategoriesStreamProvider（定义在 app_database_provider.dart）
 // 使用 StreamProvider 实现响应式监听，数据变更时自动更新 UI
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 归档处理计划（归档弹窗内使用）
+// ─────────────────────────────────────────────────────────────────────────────
+
+enum _ArchiveAction {
+  delete, // 无流水 → 直接软删除
+  merge,  // 有流水 + 有同名可迁移目标 → 迁移后软删除
+  archive // 有流水 + 无迁移目标 → 正常归档
+}
+
+class _ArchivePlan {
+  final Category category;
+  final int recordCount;
+  final Category? mergeTarget; // action == merge 时非 null
+
+  const _ArchivePlan({
+    required this.category,
+    required this.recordCount,
+    this.mergeTarget,
+  });
+
+  _ArchiveAction get action {
+    if (recordCount == 0) return _ArchiveAction.delete;
+    if (mergeTarget != null) return _ArchiveAction.merge;
+    return _ArchiveAction.archive;
+  }
+}
 
 /// 分类管理页面 — 重构版
 ///
@@ -276,6 +305,14 @@ class _CategoryManageScreenState extends ConsumerState<CategoryManageScreen>
                       }
                     }
 
+                    // 重名校验：同层级下不允许同名
+                    final isDuplicate = await dao.existsByName(name, kind, parentId: parentId);
+                    if (isDuplicate) {
+                      if (!ctx.mounted) return;
+                      SnackbarUtils.showError(context: ctx, message: '已存在同名分类「$name」');
+                      return;
+                    }
+
                     final userId = ref.read(currentUserIdProvider);
                     final catId = IdGenerator.generate();
                     await dao.insertCategory(
@@ -379,6 +416,20 @@ class _CategoryManageScreenState extends ConsumerState<CategoryManageScreen>
                     if (name.isEmpty) return;
                     final dao = ref.read(categoryDaoProvider);
 
+                    // 重名校验：排除自身，按更新后的层级位置检查
+                    final parentIdToCheck = isParent ? null : selectedParentId;
+                    final isDuplicate = await dao.existsByName(
+                      name,
+                      category.kind,
+                      parentId: parentIdToCheck,
+                      excludeId: category.id,
+                    );
+                    if (isDuplicate) {
+                      if (!ctx.mounted) return;
+                      SnackbarUtils.showError(context: ctx, message: '已存在同名分类「$name」');
+                      return;
+                    }
+
                     // 如果二级分类更换了父级
                     if (!isParent && selectedParentId != category.parentId) {
                       await dao.moveCategory(category.id, selectedParentId!);
@@ -419,106 +470,210 @@ class _CategoryManageScreenState extends ConsumerState<CategoryManageScreen>
   }
 
   // ═══════════════════════════════════════════════════════════════
-  // 归档分类弹窗
+  // 归档分类 — 智能判断链
   // ═══════════════════════════════════════════════════════════════
 
   static const _protectedCategories = {'其他', '其他收入'};
 
-  void _showArchiveDialog(Category category) {
+  /// 归档入口：保留分类检查 → 分发到一级/二级流程
+  Future<void> _showArchiveDialog(Category category) async {
     if (_protectedCategories.contains(category.name)) {
-      showDialog(
-        context: context,
-        builder: (ctx) => AlertDialog(
-          title: const Text('无法归档'),
-          content: Text('「${category.name}」是系统保留分类，不可归档。'),
-          actions: [
-            FilledButton(
-              onPressed: () => Navigator.of(ctx).pop(),
-              child: const Text('知道了'),
-            ),
-          ],
-        ),
+      final dao = ref.read(categoryDaoProvider);
+      final hasDuplicate = await dao.existsByName(
+        category.name, category.kind, excludeId: category.id,
       );
+      if (!hasDuplicate) {
+        if (!mounted) return;
+        showDialog(
+          context: context,
+          builder: (ctx) => AlertDialog(
+            title: const Text('无法归档'),
+            content: Text('「${category.name}」是系统保留分类，不可归档。'),
+            actions: [
+              FilledButton(
+                onPressed: () => Navigator.of(ctx).pop(),
+                child: const Text('知道了'),
+              ),
+            ],
+          ),
+        );
+        return;
+      }
+      if (!mounted) return;
+    }
+
+    if (category.parentId == null) {
+      await _showParentArchiveFlow(category);
+    } else {
+      await _showChildArchiveFlow(category);
+    }
+  }
+
+  /// 构建单个分类的处理计划（查流水数量 + 查迁移目标）
+  Future<_ArchivePlan> _buildPlan(Category category) async {
+    final dao = ref.read(categoryDaoProvider);
+    final count = await dao.getRecordCount(category.id);
+    final target = count > 0 ? await dao.findMergeTarget(category) : null;
+    return _ArchivePlan(category: category, recordCount: count, mergeTarget: target);
+  }
+
+  // ─── 二级分类：单计划弹窗 ───────────────────────────────────────
+
+  Future<void> _showChildArchiveFlow(Category category) async {
+    final plan = await _buildPlan(category);
+    if (!mounted) return;
+    _showSinglePlanDialog(plan);
+  }
+
+  /// 单个计划弹窗（供二级分类使用）
+  void _showSinglePlanDialog(_ArchivePlan plan) {
+    final cat = plan.category;
+    final theme = Theme.of(context);
+
+    showDialog(
+      context: context,
+      builder: (ctx) {
+        switch (plan.action) {
+          // ── 无流水：直接删除 ──
+          case _ArchiveAction.delete:
+            return AlertDialog(
+              title: const Text('删除分类'),
+              content: Text('「${cat.name}」无历史流水，是否直接删除？\n删除后不可恢复。'),
+              actions: [
+                TextButton(onPressed: () => Navigator.of(ctx).pop(), child: const Text('取消')),
+                FilledButton(
+                  style: FilledButton.styleFrom(backgroundColor: theme.colorScheme.error),
+                  onPressed: () async {
+                    Navigator.of(ctx).pop();
+                    await _doSoftDelete(cat);
+                    if (mounted) SnackbarUtils.show(context: context, message: '已删除「${cat.name}」');
+                  },
+                  child: const Text('删除'),
+                ),
+              ],
+            );
+
+          // ── 有流水 + 有迁移目标 ──
+          case _ArchiveAction.merge:
+            final target = plan.mergeTarget!;
+            return AlertDialog(
+              title: const Text('迁移并删除'),
+              content: Text(
+                '「${cat.name}」有 ${plan.recordCount} 条历史流水。\n'
+                '发现同名分类「${target.name}」可接收，是否将流水迁移过去并删除此分类？',
+              ),
+              actions: [
+                TextButton(onPressed: () => Navigator.of(ctx).pop(), child: const Text('取消')),
+                TextButton(
+                  onPressed: () async {
+                    Navigator.of(ctx).pop();
+                    await _doArchive(cat);
+                    if (mounted) {
+                      SnackbarUtils.showUndo(
+                        context: context,
+                        message: '已归档「${cat.name}」',
+                        onUndo: () => _undoArchive(cat),
+                        afterDialogClose: true,
+                      );
+                    }
+                  },
+                  child: const Text('仅归档'),
+                ),
+                FilledButton(
+                  onPressed: () async {
+                    Navigator.of(ctx).pop();
+                    await ref.read(categoryDedupServiceProvider)
+                        .mergeRecords(from: cat, into: target);
+                    if (mounted) SnackbarUtils.show(context: context, message: '已迁移并删除「${cat.name}」');
+                  },
+                  child: const Text('迁移并删除'),
+                ),
+              ],
+            );
+
+          // ── 有流水 + 无迁移目标：正常归档 ──
+          case _ArchiveAction.archive:
+            return AlertDialog(
+              title: const Text('归档分类'),
+              content: Text('「${cat.name}」有 ${plan.recordCount} 条历史流水，归档后历史记录保留，新记录无法选择此分类。'),
+              actions: [
+                TextButton(onPressed: () => Navigator.of(ctx).pop(), child: const Text('取消')),
+                FilledButton(
+                  onPressed: () async {
+                    Navigator.of(ctx).pop();
+                    await _doArchive(cat);
+                    if (mounted) {
+                      SnackbarUtils.showUndo(
+                        context: context,
+                        message: '已归档「${cat.name}」',
+                        onUndo: () => _undoArchive(cat),
+                        afterDialogClose: true,
+                      );
+                    }
+                  },
+                  child: const Text('归档'),
+                ),
+              ],
+            );
+        }
+      },
+    );
+  }
+
+  // ─── 一级分类：多计划预览弹窗 ──────────────────────────────────
+
+  Future<void> _showParentArchiveFlow(Category category) async {
+    final dao = ref.read(categoryDaoProvider);
+    final children = await dao.getSubCategories(category.id);
+
+    // 并行构建所有计划（子分类各自独立判断 + 自身）
+    final allPlans = await Future.wait([
+      ...children.map(_buildPlan),
+      _buildPlan(category),
+    ]);
+    if (!mounted) return;
+
+    final childPlans = allPlans.sublist(0, allPlans.length - 1);
+    final selfPlan = allPlans.last;
+
+    // 全部都是正常归档 → 用简洁弹窗
+    if (allPlans.every((p) => p.action == _ArchiveAction.archive)) {
+      _showBulkArchiveDialog(category, childPlans.map((p) => p.category).toList());
       return;
     }
 
-    final isParent = category.parentId == null;
+    // 有删除或迁移 → 展示处理计划预览
+    _showPlanPreviewDialog(selfPlan: selfPlan, childPlans: childPlans);
+  }
+
+  /// 全部正常归档时的简洁确认弹窗（原逻辑）
+  void _showBulkArchiveDialog(Category parent, List<Category> children) {
+    final childCount = children.length;
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
         title: const Text('归档分类'),
         content: Text(
-          isParent
-              ? '确定要归档「${category.name}」及其所有子分类吗？\n归档后历史记录保留，新记录无法再选择此分类。'
-              : '确定要归档「${category.name}」吗？\n归档后历史记录保留，新记录无法再选择此分类。',
+          childCount > 0
+              ? '确定要归档「${parent.name}」及其 $childCount 个子分类吗？\n归档后历史记录保留，新记录无法再选择。'
+              : '确定要归档「${parent.name}」吗？\n归档后历史记录保留，新记录无法再选择。',
         ),
         actions: [
-          TextButton(
-            onPressed: () => Navigator.of(ctx).pop(),
-            child: const Text('取消'),
-          ),
+          TextButton(onPressed: () => Navigator.of(ctx).pop(), child: const Text('取消')),
           FilledButton(
             onPressed: () async {
-              final dao = ref.read(categoryDaoProvider);
-              await dao.archiveCategory(category.id);
-
-              // 如果是一级分类，同时归档其所有子分类
-              if (isParent) {
-                final children = await dao.getSubCategories(category.id);
-                for (final child in children) {
-                  await dao.archiveCategory(child.id);
-                  _syncCategory(child.id, 'update', {
-                    'id': child.id,
-                    'name': child.name,
-                    'parent_id': child.parentId,
-                    'icon': child.icon,
-                    'kind': child.kind,
-                    'is_archived': true,
-                  });
-                }
-              }
-
-              _syncCategory(category.id, 'update', {
-                'id': category.id,
-                'name': category.name,
-                'parent_id': category.parentId,
-                'icon': category.icon,
-                'kind': category.kind,
-                'is_archived': true,
-              });
-
-              if (!ctx.mounted) return;
               Navigator.of(ctx).pop();
-              _refresh();
+              for (final child in children) {
+                await _doArchive(child);
+              }
+              await _doArchive(parent);
               if (mounted) {
                 SnackbarUtils.showUndo(
                   context: context,
-                  message: '已归档「${category.name}」',
+                  message: '已归档「${parent.name}」',
                   onUndo: () async {
-                    await dao.unarchiveCategory(category.id);
-                    if (isParent) {
-                      final children = await dao.getSubCategories(category.id);
-                      for (final child in children) {
-                        await dao.unarchiveCategory(child.id);
-                        _syncCategory(child.id, 'update', {
-                          'id': child.id,
-                          'name': child.name,
-                          'parent_id': child.parentId,
-                          'icon': child.icon,
-                          'kind': child.kind,
-                          'is_archived': false,
-                        });
-                      }
-                    }
-                    _syncCategory(category.id, 'update', {
-                      'id': category.id,
-                      'name': category.name,
-                      'parent_id': category.parentId,
-                      'icon': category.icon,
-                      'kind': category.kind,
-                      'is_archived': false,
-                    });
-                    _refresh();
+                    for (final child in children) { await _undoArchive(child); }
+                    await _undoArchive(parent);
                   },
                   afterDialogClose: true,
                 );
@@ -529,6 +684,113 @@ class _CategoryManageScreenState extends ConsumerState<CategoryManageScreen>
         ],
       ),
     );
+  }
+
+  /// 有删除/迁移操作时的计划预览弹窗
+  void _showPlanPreviewDialog({
+    required _ArchivePlan selfPlan,
+    required List<_ArchivePlan> childPlans,
+  }) {
+    final theme = Theme.of(context);
+
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('归档「${selfPlan.category.name}」'),
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              if (childPlans.isNotEmpty) ...[
+                Text('子分类', style: theme.textTheme.labelMedium?.copyWith(
+                  color: theme.colorScheme.onSurfaceVariant,
+                )),
+                const SizedBox(height: 6),
+                ...childPlans.map((p) => _PlanRow(plan: p, theme: theme)),
+                const Divider(height: 20),
+              ],
+              Text('一级分类本身', style: theme.textTheme.labelMedium?.copyWith(
+                color: theme.colorScheme.onSurfaceVariant,
+              )),
+              const SizedBox(height: 6),
+              _PlanRow(plan: selfPlan, theme: theme),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.of(ctx).pop(), child: const Text('取消')),
+          FilledButton(
+            onPressed: () async {
+              Navigator.of(ctx).pop();
+              // 先执行子分类，再执行自身
+              for (final plan in [...childPlans, selfPlan]) {
+                await _executePlan(plan);
+              }
+              if (mounted) {
+                SnackbarUtils.show(
+                  context: context,
+                  message: '已处理「${selfPlan.category.name}」及其子分类',
+                );
+              }
+            },
+            child: const Text('确认执行'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ─── 执行单个计划 ───────────────────────────────────────────────
+
+  Future<void> _executePlan(_ArchivePlan plan) async {
+    switch (plan.action) {
+      case _ArchiveAction.delete:
+        await _doSoftDelete(plan.category);
+      case _ArchiveAction.merge:
+        await ref.read(categoryDedupServiceProvider)
+            .mergeRecords(from: plan.category, into: plan.mergeTarget!);
+      case _ArchiveAction.archive:
+        await _doArchive(plan.category);
+    }
+  }
+
+  // ─── 基础操作 ───────────────────────────────────────────────────
+
+  /// 软删除分类（调用 dedup service 统一入队）
+  Future<void> _doSoftDelete(Category category) async {
+    await ref.read(categoryDedupServiceProvider).softDeleteCategory(category);
+    _refresh();
+  }
+
+  /// 归档分类并入同步队列
+  Future<void> _doArchive(Category category) async {
+    final dao = ref.read(categoryDaoProvider);
+    await dao.archiveCategory(category.id);
+    _syncCategory(category.id, 'update', {
+      'id': category.id,
+      'name': category.name,
+      'parent_id': category.parentId,
+      'icon': category.icon,
+      'kind': category.kind,
+      'is_archived': true,
+    });
+    _refresh();
+  }
+
+  /// 撤销归档
+  Future<void> _undoArchive(Category category) async {
+    final dao = ref.read(categoryDaoProvider);
+    await dao.unarchiveCategory(category.id);
+    _syncCategory(category.id, 'update', {
+      'id': category.id,
+      'name': category.name,
+      'parent_id': category.parentId,
+      'icon': category.icon,
+      'kind': category.kind,
+      'is_archived': false,
+    });
+    _refresh();
   }
 }
 
@@ -902,21 +1164,136 @@ class _IconPicker extends StatelessWidget {
 }
 
 // ═══════════════════════════════════════════════════════════════════
+// 归档计划行（处理计划预览弹窗内使用）
+// ═══════════════════════════════════════════════════════════════════
+
+class _PlanRow extends StatelessWidget {
+  final _ArchivePlan plan;
+  final ThemeData theme;
+
+  const _PlanRow({required this.plan, required this.theme});
+
+  @override
+  Widget build(BuildContext context) {
+    final (icon, color, label) = switch (plan.action) {
+      _ArchiveAction.delete => (
+          Icons.delete_outline,
+          theme.colorScheme.error,
+          '无流水，将删除',
+        ),
+      _ArchiveAction.merge => (
+          Icons.swap_horiz,
+          theme.colorScheme.primary,
+          '${plan.recordCount} 条流水 → 迁入「${plan.mergeTarget!.name}」后删除',
+        ),
+      _ArchiveAction.archive => (
+          Icons.archive_outlined,
+          theme.colorScheme.onSurfaceVariant,
+          '${plan.recordCount} 条流水，将归档保留',
+        ),
+    };
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(icon, size: 16, color: color),
+          const SizedBox(width: 8),
+          Expanded(
+            child: RichText(
+              text: TextSpan(
+                style: theme.textTheme.bodySmall,
+                children: [
+                  TextSpan(
+                    text: '${plan.category.name}  ',
+                    style: const TextStyle(fontWeight: FontWeight.w600),
+                  ),
+                  TextSpan(text: label, style: TextStyle(color: color)),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════
 // 已归档分类列表页面
 // ═══════════════════════════════════════════════════════════════════
 
-class _ArchivedCategoriesScreen extends ConsumerWidget {
+class _ArchivedCategoriesScreen extends ConsumerStatefulWidget {
   final void Function(Category category) onRestore;
 
   const _ArchivedCategoriesScreen({required this.onRestore});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<_ArchivedCategoriesScreen> createState() =>
+      _ArchivedCategoriesScreenState();
+}
+
+class _ArchivedCategoriesScreenState
+    extends ConsumerState<_ArchivedCategoriesScreen> {
+  /// 一键清理：
+  ///   - 无流水 → 直接软删除
+  ///   - 有流水 + 找到同名活跃迁移目标 → 迁移流水后软删除
+  ///   - 有流水 + 无迁移目标 → 跳过（只能手动恢复）
+  Future<void> _cleanupEmpty(List<Category> archived) async {
+    final dao = ref.read(categoryDaoProvider);
+    final dedup = ref.read(categoryDedupServiceProvider);
+    var deleted = 0;
+    var merged = 0;
+
+    for (final cat in archived) {
+      final n = await dao.getRecordCount(cat.id);
+      if (n == 0) {
+        await dedup.softDeleteCategory(cat);
+        deleted++;
+      } else {
+        final target = await dao.findMergeTarget(cat);
+        if (target != null) {
+          await dedup.mergeRecords(from: cat, into: target);
+          merged++;
+        }
+      }
+    }
+
+    if (mounted) {
+      final parts = <String>[];
+      if (deleted > 0) parts.add('删除 $deleted 个无流水分类');
+      if (merged > 0) parts.add('迁移合并 $merged 个分类');
+      SnackbarUtils.show(
+        context: context,
+        message: parts.isNotEmpty ? '已${parts.join('，')}' : '没有可清理的归档分类',
+      );
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final asyncCats = ref.watch(allCategoriesStreamProvider);
 
     return Scaffold(
-      appBar: AppBar(title: const Text('已归档分类')),
+      appBar: AppBar(
+        title: const Text('已归档分类'),
+        actions: [
+          asyncCats.maybeWhen(
+            data: (all) {
+              final archived = all.where((c) => c.isArchived).toList();
+              if (archived.isEmpty) return const SizedBox.shrink();
+              return IconButton(
+                icon: const Icon(Icons.cleaning_services_outlined),
+                tooltip: '清理无流水归档分类',
+                onPressed: () => _cleanupEmpty(archived),
+              );
+            },
+            orElse: () => const SizedBox.shrink(),
+          ),
+        ],
+      ),
       body: asyncCats.when(
         loading: () => PageSkeletons.list(itemCount: 4),
         error: (e, _) => ErrorStateWidget(
@@ -939,7 +1316,6 @@ class _ArchivedCategoriesScreen extends ConsumerWidget {
             );
           }
 
-          // 按 kind 分组
           final expense = archived.where((c) => c.kind == 'expense').toList();
           final income = archived.where((c) => c.kind == 'income').toList();
 
@@ -950,14 +1326,14 @@ class _ArchivedCategoriesScreen extends ConsumerWidget {
                 _ArchivedSectionHeader(title: '支出', theme: theme),
                 ...expense.map((c) => _ArchivedCategoryTile(
                       category: c,
-                      onRestore: () => onRestore(c),
+                      onRestore: () => widget.onRestore(c),
                     )),
               ],
               if (income.isNotEmpty) ...[
                 _ArchivedSectionHeader(title: '收入', theme: theme),
                 ...income.map((c) => _ArchivedCategoryTile(
                       category: c,
-                      onRestore: () => onRestore(c),
+                      onRestore: () => widget.onRestore(c),
                     )),
               ],
             ],
@@ -985,7 +1361,11 @@ class _ArchivedSectionHeader extends StatelessWidget {
   }
 }
 
-class _ArchivedCategoryTile extends StatelessWidget {
+// ═══════════════════════════════════════════════════════════════════
+// 已归档分类 Tile — 异步检测流水数量和可迁移目标
+// ═══════════════════════════════════════════════════════════════════
+
+class _ArchivedCategoryTile extends ConsumerStatefulWidget {
   final Category category;
   final VoidCallback onRestore;
 
@@ -995,27 +1375,164 @@ class _ArchivedCategoryTile extends StatelessWidget {
   });
 
   @override
+  ConsumerState<_ArchivedCategoryTile> createState() =>
+      _ArchivedCategoryTileState();
+}
+
+class _ArchivedCategoryTileState extends ConsumerState<_ArchivedCategoryTile> {
+  late Future<({int count, Category? target})> _statusFuture;
+
+  @override
+  void initState() {
+    super.initState();
+    _statusFuture = _loadStatus();
+  }
+
+  Future<({int count, Category? target})> _loadStatus() async {
+    final dao = ref.read(categoryDaoProvider);
+    final count = await dao.getRecordCount(widget.category.id);
+    final target = count > 0 ? await dao.findMergeTarget(widget.category) : null;
+    return (count: count, target: target);
+  }
+
+  Future<void> _doMerge(Category target) async {
+    await ref.read(categoryDedupServiceProvider)
+        .mergeRecords(from: widget.category, into: target);
+    if (mounted) {
+      SnackbarUtils.show(
+        context: context,
+        message: '已迁移并删除「${widget.category.name}」',
+      );
+    }
+  }
+
+  Future<void> _doDelete() async {
+    await ref.read(categoryDedupServiceProvider).softDeleteCategory(widget.category);
+    if (mounted) {
+      SnackbarUtils.show(context: context, message: '已删除「${widget.category.name}」');
+    }
+  }
+
+  @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final icon = getCategoryIcon(dbIcon: category.icon, categoryName: category.name);
-    final isParent = category.parentId == null;
+    final cat = widget.category;
+    final icon = getCategoryIcon(dbIcon: cat.icon, categoryName: cat.name);
+    final isParent = cat.parentId == null;
 
     return Card(
       margin: const EdgeInsets.symmetric(vertical: 3),
-      child: ListTile(
-        leading: CircleAvatar(
-          backgroundColor: theme.colorScheme.surfaceContainerHighest,
-          child: Icon(icon, size: 18, color: theme.colorScheme.onSurfaceVariant),
-        ),
-        title: Text(category.name),
-        subtitle: Text(isParent ? '一级分类' : '二级分类',
-            style: TextStyle(color: theme.colorScheme.outline, fontSize: 12)),
-        trailing: FilledButton.tonalIcon(
-          onPressed: onRestore,
-          icon: const Icon(Icons.unarchive, size: 16),
-          label: const Text('恢复'),
-        ),
+      child: FutureBuilder(
+        future: _statusFuture,
+        builder: (context, snapshot) {
+          // 操作按钮区：加载中时只显示「恢复」
+          final trailing = !snapshot.hasData
+              ? FilledButton.tonalIcon(
+                  onPressed: widget.onRestore,
+                  icon: const Icon(Icons.unarchive, size: 16),
+                  label: const Text('恢复'),
+                )
+              : _buildTrailing(theme, snapshot.data!);
+
+          return ListTile(
+            leading: CircleAvatar(
+              backgroundColor: theme.colorScheme.surfaceContainerHighest,
+              child: Icon(icon, size: 18, color: theme.colorScheme.onSurfaceVariant),
+            ),
+            title: Text(cat.name),
+            subtitle: Text(
+              isParent ? '一级分类' : '二级分类',
+              style: TextStyle(color: theme.colorScheme.outline, fontSize: 12),
+            ),
+            trailing: trailing,
+          );
+        },
       ),
+    );
+  }
+
+  Widget _buildTrailing(ThemeData theme, ({int count, Category? target}) status) {
+    // 无流水 → 可删除
+    if (status.count == 0) {
+      return Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          FilledButton.tonalIcon(
+            onPressed: widget.onRestore,
+            icon: const Icon(Icons.unarchive, size: 16),
+            label: const Text('恢复'),
+          ),
+          const SizedBox(width: 6),
+          IconButton(
+            icon: Icon(Icons.delete_outline, color: theme.colorScheme.error),
+            tooltip: '无流水，直接删除',
+            onPressed: () => showDialog(
+              context: context,
+              builder: (ctx) => AlertDialog(
+                title: const Text('删除分类'),
+                content: Text('「${widget.category.name}」无历史流水，是否删除？'),
+                actions: [
+                  TextButton(onPressed: () => Navigator.of(ctx).pop(), child: const Text('取消')),
+                  FilledButton(
+                    style: FilledButton.styleFrom(backgroundColor: theme.colorScheme.error),
+                    onPressed: () async {
+                      Navigator.of(ctx).pop();
+                      await _doDelete();
+                    },
+                    child: const Text('删除'),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ],
+      );
+    }
+
+    // 有流水 + 有迁移目标 → 可迁移并删除
+    if (status.target != null) {
+      return Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          FilledButton.tonalIcon(
+            onPressed: widget.onRestore,
+            icon: const Icon(Icons.unarchive, size: 16),
+            label: const Text('恢复'),
+          ),
+          const SizedBox(width: 6),
+          FilledButton.icon(
+            icon: const Icon(Icons.swap_horiz, size: 16),
+            label: const Text('迁移'),
+            onPressed: () => showDialog(
+              context: context,
+              builder: (ctx) => AlertDialog(
+                title: const Text('迁移并删除'),
+                content: Text(
+                  '「${widget.category.name}」有 ${status.count} 条流水。\n'
+                  '将迁移到「${status.target!.name}」并删除此归档分类，是否确认？',
+                ),
+                actions: [
+                  TextButton(onPressed: () => Navigator.of(ctx).pop(), child: const Text('取消')),
+                  FilledButton(
+                    onPressed: () async {
+                      Navigator.of(ctx).pop();
+                      await _doMerge(status.target!);
+                    },
+                    child: const Text('确认'),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ],
+      );
+    }
+
+    // 有流水 + 无迁移目标 → 只能恢复
+    return FilledButton.tonalIcon(
+      onPressed: widget.onRestore,
+      icon: const Icon(Icons.unarchive, size: 16),
+      label: const Text('恢复'),
     );
   }
 }

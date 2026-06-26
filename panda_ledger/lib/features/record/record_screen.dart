@@ -857,7 +857,7 @@ class _AmountDisplay extends StatelessWidget {
     return recordType == 'income'
         ? theme.colorScheme.primary
         : recordType == 'transfer'
-            ? theme.colorScheme.secondary
+            ? theme.colorScheme.onSurface  // secondary = accentLight（极浅）→ 字不可见，改为高对比
             : theme.colorScheme.error;
   }
 
@@ -1230,7 +1230,7 @@ class _CompactTransferBar extends StatelessWidget {
               padding: const EdgeInsets.symmetric(horizontal: 10),
               child: Icon(
                 Icons.arrow_forward_rounded,
-                color: theme.colorScheme.secondary,
+                color: theme.colorScheme.onSurfaceVariant,
                 size: 22,
               ),
             ),
@@ -1276,7 +1276,7 @@ class _TransferAccountTile extends StatelessWidget {
               : theme.colorScheme.surfaceContainerHighest.withAlpha(50),
           borderRadius: BorderRadius.circular(12),
           border: hasAccount
-              ? Border.all(color: theme.colorScheme.secondary, width: 1.5)
+              ? Border.all(color: theme.colorScheme.outline, width: 1.5)  // secondary=极浅→不可见
               : Border.all(
                   color: theme.colorScheme.outline.withAlpha(80), width: 1),
         ),
@@ -1287,7 +1287,7 @@ class _TransferAccountTile extends StatelessWidget {
               Icon(
                 _accountTypeIcon(account!.type),
                 size: 15,
-                color: theme.colorScheme.secondary,
+                color: theme.colorScheme.onSurface,  // secondary = accentLight，极浅不可见
               ),
               const SizedBox(width: 5),
             ],
@@ -1299,7 +1299,7 @@ class _TransferAccountTile extends StatelessWidget {
                   fontWeight:
                       hasAccount ? FontWeight.w600 : FontWeight.w400,
                   color: hasAccount
-                      ? theme.colorScheme.secondary
+                      ? theme.colorScheme.onSurface     // 账户已选中：高对比可读
                       : theme.colorScheme.onSurfaceVariant,
                 ),
                 maxLines: 1,
@@ -2144,7 +2144,13 @@ class _NumRow extends StatelessWidget {
   }
 }
 
-class _NumKey extends StatefulWidget {
+/// 数字键盘单个按键（StatelessWidget + InkWell）
+///
+/// 原先用 GestureDetector + AnimatedContainer + _pressed 状态做按压反馈，
+/// 导致 onTapDown/onTapUp 的快速 setState 与父组件 rebuild 叠加，
+/// 造成背景/文字颜色不同步的"反复闪烁"。
+/// 改为 InkWell：按压状态由 Flutter 框架内部维护，无 setState 竞争。
+class _NumKey extends StatelessWidget {
   final String label;
   final void Function(String) onTap;
   final ThemeData theme;
@@ -2152,44 +2158,27 @@ class _NumKey extends StatefulWidget {
   const _NumKey(this.label, this.onTap, this.theme);
 
   @override
-  State<_NumKey> createState() => _NumKeyState();
-}
-
-class _NumKeyState extends State<_NumKey> {
-  bool _pressed = false;
-
-  @override
   Widget build(BuildContext context) {
     return Expanded(
       child: SizedBox(
         height: 52,
-        child: GestureDetector(
-          onTapDown: (_) => setState(() => _pressed = true),
-          onTapUp: (_) {
-            setState(() => _pressed = false);
-            widget.onTap(widget.label);
-          },
-          onTapCancel: () => setState(() => _pressed = false),
-          child: Padding(
-            padding: const EdgeInsets.all(3),
-            child: AnimatedContainer(
-              duration: const Duration(milliseconds: 60),
-              decoration: BoxDecoration(
-                color: _pressed
-                    ? widget.theme.colorScheme.surfaceContainerHighest
-                    : Colors.transparent,
-                borderRadius: BorderRadius.circular(12),
-              ),
-              alignment: Alignment.center,
-              child: Text(
-                widget.label,
-                style: TextStyle(
-                  fontSize: 22,
-                  fontWeight: FontWeight.w400,
-                  color: _pressed
-                      ? widget.theme.colorScheme.primary
-                      : widget.theme.colorScheme.onSurface,
-                  fontFeatures: const [FontFeature.tabularFigures()],
+        child: Padding(
+          padding: const EdgeInsets.all(3),
+          child: Material(
+            color: Colors.transparent,
+            borderRadius: BorderRadius.circular(12),
+            child: InkWell(
+              borderRadius: BorderRadius.circular(12),
+              onTap: () => onTap(label),
+              child: Center(
+                child: Text(
+                  label,
+                  style: TextStyle(
+                    fontSize: 22,
+                    fontWeight: FontWeight.w400,
+                    color: theme.colorScheme.onSurface,
+                    fontFeatures: const [FontFeature.tabularFigures()],
+                  ),
                 ),
               ),
             ),

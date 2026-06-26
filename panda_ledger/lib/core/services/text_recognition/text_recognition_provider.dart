@@ -1,4 +1,5 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../../../features/auth/auth_provider.dart';
 import 'models/parsed_transaction.dart';
@@ -6,20 +7,35 @@ import 'ai_service_interface.dart';
 import 'ai_service_stub.dart';
 import 'edge_function_ai_service.dart';
 
-/// AI 服务 Provider（响应式）
+/// AI 服务 Provider（响应式，三重保护）
 ///
-/// 监听 authStateProvider，认证状态变化时自动切换实现：
-/// - 已登录 → EdgeFunctionAiService（通过 Supabase Edge Function 调 AI）
-/// - 未登录 → AiServiceStub（空实现，上层会在调用前先通过会员门禁）
+/// **方案一（预热）**：认证成功时在后台触发 preheat()，唤醒 Edge Function 冷启动。
 ///
-/// 使用 ref.watch 而非直接读 currentSession，确保冷启动 / 后台恢复时
-/// session 就绪后 Provider 能自动重建，不再永久返回 Stub。
+/// **方案三（修复 auth 竞态）**：
+/// `authStateProvider` 基于 `onAuthStateChange` 流，该流在初次订阅时可能短暂
+/// 发出 session=null 事件（Token 刷新过渡期），导致 Provider 瞬间切回 AiServiceStub，
+/// 用户此时调用 AI 得到空结果。
+///
+/// 修复：双重判断——
+/// 1. `authStateProvider` 仍订阅（保证真正登出时能切回 Stub）
+/// 2. 当 authStatus 为非 authenticated 时，**再用 Supabase SDK 直读 currentSession 兜底**
+///    SDK 的内存缓存不受流事件抖动影响，避免误判为未登录
 final aiServiceProvider = Provider<IAiParsingService>((ref) {
   final authStatus = ref.watch(authStateProvider);
-  if (authStatus != AuthStatus.authenticated) {
+
+  // 方案三核心：authStateProvider 短暂处于非 authenticated 时，
+  // 用 SDK 直读内存 session 兜底，防止竞态导致误返回 AiServiceStub
+  final hasLiveSession =
+      Supabase.instance.client.auth.currentSession != null;
+
+  if (authStatus != AuthStatus.authenticated && !hasLiveSession) {
     return AiServiceStub();
   }
-  return const EdgeFunctionAiService();
+
+  const service = EdgeFunctionAiService();
+  // 方案一：异步预热，不阻塞 Provider 返回，不影响任何 UI
+  service.preheat();
+  return service;
 });
 
 /// 文字识别服务 — 直接调用 AI 解析

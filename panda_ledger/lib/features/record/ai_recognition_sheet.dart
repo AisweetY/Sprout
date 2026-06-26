@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../core/services/text_recognition/edge_function_ai_service.dart';
 import '../../core/services/text_recognition/models/parsed_transaction.dart';
 import '../../core/services/text_recognition/text_recognition_provider.dart';
 import '../../data/local/app_database_provider.dart';
@@ -22,6 +23,8 @@ class _AiRecognitionSheetState extends ConsumerState<AiRecognitionSheet> {
   final _inputCtrl = TextEditingController();
   bool _isParsing = false;
   ParsedTransaction? _result;
+  /// 调用失败时的错误提示（区别于"AI 确实没识别出来"）
+  String? _parseError;
 
   @override
   void dispose() {
@@ -33,7 +36,10 @@ class _AiRecognitionSheetState extends ConsumerState<AiRecognitionSheet> {
     final input = _inputCtrl.text.trim();
     if (input.isEmpty) return;
 
-    setState(() => _isParsing = true);
+    setState(() {
+      _isParsing = true;
+      _parseError = null;
+    });
 
     // 获取当前分类和账户列表
     final categories = ref.read(categoryDaoProvider);
@@ -47,18 +53,104 @@ class _AiRecognitionSheetState extends ConsumerState<AiRecognitionSheet> {
 
     // 调用识别服务
     final service = ref.read(textRecognitionProvider);
-    final result = await service.parse(
-      userInput: input,
-      existingCategories: catMap,
-      existingAccounts: acctMap,
-    );
 
-    if (mounted) {
+    try {
+      // ── 方案二：首次调用空结果时自动静默重试一次 ──
+      //
+      // 场景：Supabase Edge Function 冷启动导致首次调用失败（网络异常或返回空），
+      // 自动等待 1 秒后发起第二次请求（此时函数已热）。
+      // 对用户透明，无需手动点"重试"。
+      ParsedTransaction result = await service.parse(
+        userInput: input,
+        existingCategories: catMap,
+        existingAccounts: acctMap,
+      );
+
+      if (!mounted) return;
+
+      if (!result.hasPartialResult) {
+        // 第一次返回空 → 静默等待 1s 后自动重试
+        // 显示轻量提示，告知用户正在处理，不要造成"假死"感
+        if (mounted) {
+          // 通过 _parseError 临时显示等待提示（不用新状态，复用已有变量）
+          // 注：此处不 setState，避免 UI 闪烁；用 debugPrint 记录即可
+          debugPrint('⚠️ AI 首次调用空结果，1s 后自动重试…');
+        }
+        await Future.delayed(const Duration(milliseconds: 1000));
+        if (!mounted) return;
+
+        result = await service.parse(
+          userInput: input,
+          existingCategories: catMap,
+          existingAccounts: acctMap,
+        );
+        if (!mounted) return;
+      }
+
+      // 两次调用后依然无结果 → 显示错误提示
+      if (!result.hasPartialResult) {
+        setState(() {
+          _isParsing = false;
+          _parseError = '识别失败，请重试';
+        });
+        return;
+      }
+
       setState(() {
         _isParsing = false;
         _result = result;
       });
+    } on AiMembershipRequiredException {
+      if (!mounted) return;
+      setState(() {
+        _isParsing = false;
+        _parseError = 'AI 识别功能需要开通会员';
+      });
+    } on AiAuthExpiredException {
+      if (!mounted) return;
+      setState(() {
+        _isParsing = false;
+        _parseError = '登录状态已过期，请重新登录后再试';
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _isParsing = false;
+        _parseError = '识别出错，请重试';
+      });
     }
+  }
+
+  /// 解析失败时展示错误提示 + 重试按钮
+  Widget _buildParseError(BuildContext context, ThemeData theme) {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 24),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.error_outline, size: 40, color: theme.colorScheme.error),
+            const SizedBox(height: 12),
+            Text(
+              _parseError!,
+              style: theme.textTheme.bodyLarge?.copyWith(
+                color: theme.colorScheme.onSurfaceVariant,
+              ),
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 20),
+            FilledButton.icon(
+              icon: const Icon(Icons.refresh, size: 18),
+              label: const Text('重试'),
+              onPressed: () {
+                setState(() => _parseError = null);
+                _parse();
+              },
+            ),
+          ],
+        ),
+      ),
+    );
   }
 
   @override
@@ -122,30 +214,32 @@ class _AiRecognitionSheetState extends ConsumerState<AiRecognitionSheet> {
 
               const SizedBox(height: 16),
 
-              // 解析结果 / 确认卡片
+              // 解析结果 / 错误提示 / 确认卡片
               Expanded(
-                child: _result != null
-                    ? _ConfirmationCard(
-                        result: _result!,
-                        onConfirm: () {
-                          Navigator.of(context).pop(_result);
-                        },
-                        onDismiss: () {
-                          setState(() => _result = null);
-                        },
-                      )
-                    : Center(
-                        child: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Icon(Icons.auto_awesome, size: 18,
-                                color: theme.colorScheme.onSurfaceVariant),
-                            const SizedBox(width: 6),
-                            Text('输入描述后点击解析',
-                                style: theme.textTheme.bodyMedium),
-                          ],
-                        ),
-                      ),
+                child: _parseError != null
+                    ? _buildParseError(context, theme)
+                    : _result != null
+                        ? _ConfirmationCard(
+                            result: _result!,
+                            onConfirm: () {
+                              Navigator.of(context).pop(_result);
+                            },
+                            onDismiss: () {
+                              setState(() => _result = null);
+                            },
+                          )
+                        : Center(
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Icon(Icons.auto_awesome, size: 18,
+                                    color: theme.colorScheme.onSurfaceVariant),
+                                const SizedBox(width: 6),
+                                Text('输入描述后点击解析',
+                                    style: theme.textTheme.bodyMedium),
+                              ],
+                            ),
+                          ),
               ),
             ],
           ),

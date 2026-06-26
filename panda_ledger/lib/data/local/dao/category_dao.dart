@@ -72,6 +72,37 @@ class CategoryDao extends DatabaseAccessor<AppDatabase> with _$CategoryDaoMixin 
     return rows.isNotEmpty ? rows.first : null;
   }
 
+  /// 检查同层级是否存在同名未删除分类（用于重名校验）
+  ///
+  /// - [parentId] 为 null 时检查一级分类；非 null 时检查对应父级下的二级分类
+  /// - [excludeId] 编辑时传入当前分类 ID，以排除自身
+  Future<bool> existsByName(
+    String name,
+    String kind, {
+    String? parentId,
+    String? excludeId,
+  }) async {
+    final rows = await (select(db.categories)
+          ..where((t) {
+            var expr = t.name.equals(name) &
+                t.kind.equals(kind) &
+                t.deleted.equals(false) &
+                t.isArchived.equals(false);
+            if (parentId == null) {
+              expr = expr & t.parentId.isNull();
+            } else {
+              expr = expr & t.parentId.equals(parentId);
+            }
+            if (excludeId != null) {
+              expr = expr & t.id.equals(excludeId).not();
+            }
+            return expr;
+          })
+          ..limit(1))
+        .get();
+    return rows.isNotEmpty;
+  }
+
   /// 插入分类
   Future<void> insertCategory(Insertable<Category> category) {
     return into(db.categories).insert(category);
@@ -96,6 +127,82 @@ class CategoryDao extends DatabaseAccessor<AppDatabase> with _$CategoryDaoMixin 
     return (update(db.categories)..where((t) => t.id.equals(id))).write(
       const CategoriesCompanion(isArchived: Value(false)),
     );
+  }
+
+  /// 查分类下的未删除流水数量
+  Future<int> getRecordCount(String categoryId) async {
+    final rows = await db.customSelect(
+      'SELECT COUNT(*) as cnt FROM records WHERE category_id = ? AND deleted = 0',
+      variables: [Variable.withString(categoryId)],
+      readsFrom: {db.records},
+    ).get();
+    return rows.first.read<int>('cnt');
+  }
+
+  /// 查找可迁移的目标分类（归档/清理时使用）
+  ///
+  /// 一级分类：同 kind+name 的其他活跃（未归档、未删除）一级分类
+  /// 二级分类：父级同名 + 自身同名 的其他活跃二级分类
+  ///   （即「一级名称和二级名称同时匹配」才算可迁移）
+  Future<Category?> findMergeTarget(Category category) async {
+    if (category.parentId == null) {
+      // 一级分类：找同名活跃一级分类
+      final rows = await (select(db.categories)
+            ..where((t) =>
+                t.name.equals(category.name) &
+                t.kind.equals(category.kind) &
+                t.parentId.isNull() &
+                t.isArchived.equals(false) &
+                t.deleted.equals(false) &
+                t.id.equals(category.id).not())
+            ..limit(1))
+          .get();
+      return rows.isNotEmpty ? rows.first : null;
+    } else {
+      // 二级分类 — 两步查找：
+      //
+      // 步骤 1：优先在同一父级下找同名活跃子分类。
+      //   场景：用户归档了「交通 → 公交」后，又在同一个「交通」下新建了「公交」。
+      //   此时没有第二个「交通」，只找"其他同名父级"会遗漏。
+      final inSameParent = await (select(db.categories)
+            ..where((t) =>
+                t.name.equals(category.name) &
+                t.parentId.equals(category.parentId!) &
+                t.isArchived.equals(false) &
+                t.deleted.equals(false) &
+                t.id.equals(category.id).not())
+            ..limit(1))
+          .get();
+      if (inSameParent.isNotEmpty) return inSameParent.first;
+
+      // 步骤 2：再找「父级同名 + 自身同名」——即存在另一个同名一级分类，
+      //   且那个一级分类下有同名子分类（历史重复一级分类的情况）。
+      final parent = await getById(category.parentId!);
+      if (parent == null) return null;
+
+      final sameNameParents = await (select(db.categories)
+            ..where((t) =>
+                t.name.equals(parent.name) &
+                t.kind.equals(category.kind) &
+                t.parentId.isNull() &
+                t.isArchived.equals(false) &
+                t.deleted.equals(false) &
+                t.id.equals(parent.id).not()))
+          .get();
+
+      for (final sameParent in sameNameParents) {
+        final targets = await (select(db.categories)
+              ..where((t) =>
+                  t.name.equals(category.name) &
+                  t.parentId.equals(sameParent.id) &
+                  t.isArchived.equals(false) &
+                  t.deleted.equals(false))
+              ..limit(1))
+            .get();
+        if (targets.isNotEmpty) return targets.first;
+      }
+      return null;
+    }
   }
 
   /// 软删除分类

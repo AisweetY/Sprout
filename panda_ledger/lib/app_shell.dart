@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import 'core/services/text_recognition/edge_function_ai_service.dart';
+import 'data/category_dedup_service.dart';
 import 'data/local/seed_service.dart';
 import 'data/sync/sync_queue_dao_provider.dart';
 import 'features/auth/auth_provider.dart';
@@ -75,6 +77,11 @@ class _AppShellState extends ConsumerState<AppShell>
     } catch (_) {}
     // 会员状态刷新放在同步之后（获取最新过期时间）
     ref.read(membershipProvider.notifier).refresh().catchError((_) {});
+
+    // AI Edge Function 预热：后台停留超过 ~10 分钟后函数会进入冷启动状态，
+    // 在 resume 时提前触发一次 ping，使用户下次打开 AI 记账时第一次即可成功。
+    // 仅在已登录时发起（未登录 / 本地模式下 preheat 内部的 _ensureFreshSession 会提前返回）。
+    const EdgeFunctionAiService().preheat();
   }
 
   /// 登出清理：会员缓存 + sync_queue 待处理项
@@ -97,28 +104,40 @@ class _AppShellState extends ConsumerState<AppShell>
     } catch (e) {
       debugPrint('远端数据拉取失败: $e');
     }
+    if (!mounted) return; // ← AppShell 若因 auth 竞态已被卸载，终止后续流程
 
     // 2. 拉取完成后再判断是否需要种子数据（真正新用户）
     try {
       final seedService = ref.read(seedServiceProvider);
       final needsSeeding = await seedService.needsSeeding();
-      if (needsSeeding) {
+      if (needsSeeding && mounted) {
         final userId = ref.read(currentUserIdProvider);
         await seedService.seed(userId: userId);
       }
     } catch (e) {
       debugPrint('种子数据初始化失败: $e');
     }
+    if (!mounted) return;
+
+    // 2.5 历史重名分类一次性去重（命中时才有实际工作，未命中仅一次 SQL 查询）
+    try {
+      await ref.read(categoryDedupServiceProvider).deduplicateOnce();
+    } catch (e) {
+      debugPrint('分类去重失败: $e');
+    }
+    if (!mounted) return;
 
     // 3. 推送本地离线期间积累的变更
     await syncService.processQueue().catchError((e) {
       debugPrint('启动同步推送失败: $e');
     });
+    if (!mounted) return;
 
     // 3.5 一致性对账：修复 processQueue 未完整执行 / conflict 记录
     await syncService.reconcileOnStartup().catchError((e) {
       debugPrint('启动对账失败: $e');
     });
+    if (!mounted) return;
 
     // 对账可能重新入队了记录 → 再推一次
     syncService.processQueue().catchError((e) {

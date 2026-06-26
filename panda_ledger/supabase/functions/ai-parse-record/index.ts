@@ -232,6 +232,19 @@ serve(async (req: Request): Promise<Response> => {
       return jsonResponse({ error: "身份校验失败，请重新登录" }, 401);
     }
 
+    // ── 1.5 Ping 模式：客户端预热调用，身份验证通过即返回，不消耗 AI 配额 ──
+    // 用途：客户端在用户登录后立即发送一次 ping，唤醒 Edge Function（解决冷启动），
+    // 保证用户首次正式使用 AI 记账时第一次调用即可成功。
+    let rawBody: RequestBody = {} as RequestBody;
+    try {
+      rawBody = await req.clone().json();
+    } catch {
+      rawBody = {} as RequestBody;
+    }
+    if ((rawBody as Record<string, unknown>).mode === "ping") {
+      return jsonResponse({ data: { pong: true } });
+    }
+
     // ── 2. 会员校验（服务端强校验，防止客户端门禁被绕过）──
     const { data: membership } = await supabase
       .from("memberships")

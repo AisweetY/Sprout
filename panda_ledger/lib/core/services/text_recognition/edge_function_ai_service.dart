@@ -51,6 +51,26 @@ class EdgeFunctionAiService implements IAiParsingService {
     }
   }
 
+  /// 预热：登录后在后台调用一次，唤醒 Supabase Edge Function
+  ///
+  /// Edge Function 在 Deno Deploy 上有冷启动延迟，长时间未调用后第一次
+  /// 请求会失败或超时。此方法在用户认证成功后立即触发（异步、忽略结果），
+  /// 使函数保持"热"状态，保证用户首次使用 AI 记账时第一次调用成功。
+  Future<void> preheat() async {
+    try {
+      await _ensureFreshSession();
+      // 使用 ping 模式：空 input_text，Edge Function 会提前返回，不调用 LLM
+      await Supabase.instance.client.functions
+          .invoke(
+            _functionName,
+            body: {'mode': 'ping', 'input_text': '', 'today': ''},
+          )
+          .timeout(const Duration(seconds: 20));
+    } catch (_) {
+      // 预热失败不影响任何功能，静默忽略
+    }
+  }
+
   /// 将 DateTime 格式化为 YYYY-MM-DD 字符串（本地时区）
   String _todayString() {
     final now = DateTime.now();

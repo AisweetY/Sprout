@@ -26,50 +26,81 @@ class SeedService {
 
   SeedService({required this.db, required this.syncQueue});
 
+  /// 静态互斥锁：防止 AuthGate 竞态导致 seed() 被并发调用两次
+  static bool _seedingInProgress = false;
+
   /// 检查是否需要初始化种子数据
   ///
-  /// 策略：先检查本地分类是否为空。若已完成初始同步但仍无分类
+  /// 策略：先检查本地未删除分类是否为空。若已完成初始同步但仍无分类
   /// （云端也无数据），则执行种子初始化。这是真正新用户首次使用的情况。
   Future<bool> needsSeeding() async {
-    final rows = await db.select(db.categories).get();
+    final rows = await (db.select(db.categories)
+          ..where((t) => t.deleted.equals(false)))
+        .get();
     return rows.isEmpty;
   }
 
-  /// 执行种子数据初始化
+  /// 执行种子数据初始化（幂等：重复调用不产生重复数据）
+  ///
+  /// 防护层次：
+  /// 1. 静态 _seedingInProgress 标志：防止并发调用（auth 竞态场景）
+  /// 2. 账户/分类按名称去重：即便标志失效也不会写入重复行
   Future<void> seed({required String userId}) async {
-    // ── 创建默认账户（现金） ──
-    final existingAccounts = await db.select(db.accounts).get();
-    if (existingAccounts.isEmpty) {
-      await _createDefaultAccount(userId);
+    // 第一层：互斥锁
+    if (_seedingInProgress) {
+      debugPrint('⚠️ [种子] seed() 已在执行，跳过并发调用');
+      return;
     }
+    _seedingInProgress = true;
 
-    // 创建支出分类
-    for (final name in DefaultCategories.expenseNames) {
-      final icon = DefaultCategories.expenseIcons[name] ?? 'more_horiz';
-      await _createCategory(userId, name, 'expense', icon, null);
+    try {
+      // ── 创建默认账户（现金）── 按名称判重，不依赖 isEmpty
+      final cashExists = await _accountExistsByName('现金');
+      if (!cashExists) {
+        await _createDefaultAccount(userId);
+      }
 
-      // 创建二级分类
-      final subs = DefaultCategories.subcategories[name];
-      if (subs != null) {
-        final parentId = await _getCategoryId(userId, name, 'expense');
-        if (parentId != null) {
-          for (final subName in subs) {
-            await _createCategory(userId, subName, 'expense', icon, parentId);
+      // 创建支出分类（按名称+kind判重）
+      for (final name in DefaultCategories.expenseNames) {
+        final icon = DefaultCategories.expenseIcons[name] ?? 'more_horiz';
+        final exists = await _categoryExistsByName(name, 'expense', null);
+        if (!exists) {
+          await _createCategory(userId, name, 'expense', icon, null);
+        }
+
+        // 创建二级分类
+        final subs = DefaultCategories.subcategories[name];
+        if (subs != null) {
+          final parentId = await _getCategoryId(userId, name, 'expense');
+          if (parentId != null) {
+            for (final subName in subs) {
+              final subExists =
+                  await _categoryExistsByName(subName, 'expense', parentId);
+              if (!subExists) {
+                await _createCategory(
+                    userId, subName, 'expense', icon, parentId);
+              }
+            }
           }
         }
       }
-    }
 
-    // 创建收入分类
-    for (final name in DefaultCategories.incomeNames) {
-      final icon = DefaultCategories.incomeIcons[name] ?? 'more_horiz';
-      await _createCategory(userId, name, 'income', icon, null);
-    }
+      // 创建收入分类
+      for (final name in DefaultCategories.incomeNames) {
+        final icon = DefaultCategories.incomeIcons[name] ?? 'more_horiz';
+        final exists = await _categoryExistsByName(name, 'income', null);
+        if (!exists) {
+          await _createCategory(userId, name, 'income', icon, null);
+        }
+      }
 
-    // 种子数据全部写入后，异步推送到 Supabase
-    syncQueue.processQueue().catchError((e) {
-      debugPrint('🔴 [种子同步] processQueue 异常: $e');
-    });
+      // 种子数据全部写入后，异步推送到 Supabase
+      syncQueue.processQueue().catchError((e) {
+        debugPrint('🔴 [种子同步] processQueue 异常: $e');
+      });
+    } finally {
+      _seedingInProgress = false;
+    }
   }
 
   /// 创建默认账户「现金」
@@ -158,5 +189,27 @@ class SeedService {
           ..limit(1))
         .get();
     return rows.isNotEmpty ? rows.first.id : null;
+  }
+
+  /// 判断账户名是否已存在（含软删除记录，防止重复插入）
+  Future<bool> _accountExistsByName(String name) async {
+    final rows = await (db.select(db.accounts)
+          ..where((t) => t.name.equals(name))
+          ..limit(1))
+        .get();
+    return rows.isNotEmpty;
+  }
+
+  /// 判断分类是否已存在（按名称 + kind + parentId）
+  Future<bool> _categoryExistsByName(
+      String name, String kind, String? parentId) async {
+    final query = db.select(db.categories)
+      ..where((t) =>
+          t.name.equals(name) &
+          t.kind.equals(kind) &
+          (parentId == null ? t.parentId.isNull() : t.parentId.equals(parentId)))
+      ..limit(1);
+    final rows = await query.get();
+    return rows.isNotEmpty;
   }
 }

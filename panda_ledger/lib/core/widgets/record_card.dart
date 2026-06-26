@@ -78,11 +78,13 @@ class _RecordCardState extends State<RecordCard> {
     final isTransfer = widget.type == 'transfer';
     final isExpense = widget.type == 'expense';
 
+    // 转账使用 onSurface（高对比中性色）
+    // secondary = accentLight（极浅绿），用于文字/金额时在浅色/深色模式下均几乎不可见
     final color = isExpense
         ? theme.colorScheme.error
         : widget.type == 'income'
             ? theme.colorScheme.primary
-            : theme.colorScheme.secondary;
+            : theme.colorScheme.onSurface;
 
     final catIcon = isTransfer
         ? Icons.swap_horiz_rounded
