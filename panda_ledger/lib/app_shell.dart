@@ -5,6 +5,7 @@ import 'core/services/text_recognition/edge_function_ai_service.dart';
 import 'data/category_dedup_service.dart';
 import 'data/local/seed_service.dart';
 import 'data/sync/sync_queue_dao_provider.dart';
+import 'data/sync/sync_state_provider.dart';
 import 'features/auth/auth_provider.dart';
 import 'features/home/home_screen.dart';
 import 'features/membership/membership_guard.dart';
@@ -98,59 +99,72 @@ class _AppShellState extends ConsumerState<AppShell>
 
     final syncService = ref.read(syncQueueServiceProvider);
 
-    // 1. 先从 Supabase 拉取远端数据（新设备恢复 / 增量同步）
-    try {
-      await syncService.pullFromSupabase();
-    } catch (e) {
-      debugPrint('远端数据拉取失败: $e');
-    }
-    if (!mounted) return; // ← AppShell 若因 auth 竞态已被卸载，终止后续流程
+    // 同步开始：显示进度指示器
+    ref.read(syncStateProvider.notifier).start();
 
-    // 2. 拉取完成后再判断是否需要种子数据（真正新用户）
     try {
-      final seedService = ref.read(seedServiceProvider);
-      final needsSeeding = await seedService.needsSeeding();
-      if (needsSeeding && mounted) {
-        final userId = ref.read(currentUserIdProvider);
-        await seedService.seed(userId: userId);
+      // 1. 先从 Supabase 拉取远端数据（新设备恢复 / 增量同步）
+      try {
+        await syncService.pullFromSupabase();
+      } catch (e) {
+        debugPrint('远端数据拉取失败: $e');
+      }
+      if (!mounted) return; // ← AppShell 若因 auth 竞态已被卸载，终止后续流程
+
+      // 2. 拉取完成后再判断是否需要种子数据（真正新用户）
+      try {
+        final seedService = ref.read(seedServiceProvider);
+        final needsSeeding = await seedService.needsSeeding();
+        if (needsSeeding && mounted) {
+          final userId = ref.read(currentUserIdProvider);
+          await seedService.seed(userId: userId);
+        }
+      } catch (e) {
+        debugPrint('种子数据初始化失败: $e');
+      }
+      if (!mounted) return;
+
+      // 2.5 历史重名分类一次性去重（命中时才有实际工作，未命中仅一次 SQL 查询）
+      try {
+        await ref.read(categoryDedupServiceProvider).deduplicateOnce();
+      } catch (e) {
+        debugPrint('分类去重失败: $e');
+      }
+      if (!mounted) return;
+
+      // 3. 推送本地离线期间积累的变更
+      await syncService.processQueue().catchError((e) {
+        debugPrint('启动同步推送失败: $e');
+      });
+      if (!mounted) return;
+
+      // 3.5 一致性对账：修复 processQueue 未完整执行 / conflict 记录
+      await syncService.reconcileOnStartup().catchError((e) {
+        debugPrint('启动对账失败: $e');
+      });
+      if (!mounted) return;
+
+      // 对账可能重新入队了记录 → 再推一次
+      syncService.processQueue().catchError((e) {
+        debugPrint('对账后同步推送失败: $e');
+      });
+
+      // 4. 启动后台定时同步
+      syncService.startPeriodicSync();
+
+      // 5. 刷新会员状态（异步，不阻塞启动流程）
+      ref.read(membershipProvider.notifier).refresh().catchError((e) {
+        debugPrint('会员状态刷新失败: $e');
+      });
+
+      // 同步完成：通知 UI
+      if (mounted) {
+        ref.read(syncStateProvider.notifier).done('数据同步完成');
       }
     } catch (e) {
-      debugPrint('种子数据初始化失败: $e');
+      debugPrint('初始化异常: $e');
+      if (mounted) ref.read(syncStateProvider.notifier).reset();
     }
-    if (!mounted) return;
-
-    // 2.5 历史重名分类一次性去重（命中时才有实际工作，未命中仅一次 SQL 查询）
-    try {
-      await ref.read(categoryDedupServiceProvider).deduplicateOnce();
-    } catch (e) {
-      debugPrint('分类去重失败: $e');
-    }
-    if (!mounted) return;
-
-    // 3. 推送本地离线期间积累的变更
-    await syncService.processQueue().catchError((e) {
-      debugPrint('启动同步推送失败: $e');
-    });
-    if (!mounted) return;
-
-    // 3.5 一致性对账：修复 processQueue 未完整执行 / conflict 记录
-    await syncService.reconcileOnStartup().catchError((e) {
-      debugPrint('启动对账失败: $e');
-    });
-    if (!mounted) return;
-
-    // 对账可能重新入队了记录 → 再推一次
-    syncService.processQueue().catchError((e) {
-      debugPrint('对账后同步推送失败: $e');
-    });
-
-    // 4. 启动后台定时同步
-    syncService.startPeriodicSync();
-
-    // 5. 刷新会员状态（异步，不阻塞启动流程）
-    ref.read(membershipProvider.notifier).refresh().catchError((e) {
-      debugPrint('会员状态刷新失败: $e');
-    });
   }
 
   void _onTabChange(int index) {

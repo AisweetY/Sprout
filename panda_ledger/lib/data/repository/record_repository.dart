@@ -101,7 +101,9 @@ class RecordRepository {
               'type': type,
               'category_id': categoryId,
               'note': note,
-              'occurred_at': (occurredAt ?? now).toIso8601String(),
+              // ⚑ toUtc()：Supabase timestamptz 无时区字符串按 UTC 存储，
+              //   本地时间（UTC+8）不转换会产生 +8h 偏差，拉取后跨天
+              'occurred_at': (occurredAt ?? now).toUtc().toIso8601String(),
               'source': source,
             }),
           );
@@ -316,7 +318,7 @@ class RecordRepository {
           'type': type,
           'category_id': categoryId,
           'note': note,
-          'occurred_at': (occurredAt ?? DateTime.now()).toIso8601String(),
+          'occurred_at': (occurredAt ?? DateTime.now()).toUtc().toIso8601String(),
         }),
       );
     });
@@ -356,7 +358,7 @@ class RecordRepository {
           'type': record.type,
           'category_id': record.categoryId,
           'note': record.note,
-          'occurred_at': record.occurredAt.toIso8601String(),
+          'occurred_at': record.occurredAt.toUtc().toIso8601String(),
           'source': record.source,
           'deleted': true,
           'updated_at': now.toIso8601String(),
@@ -398,7 +400,7 @@ class RecordRepository {
           'type': record.type,
           'category_id': record.categoryId,
           'note': record.note,
-          'occurred_at': record.occurredAt.toIso8601String(),
+          'occurred_at': record.occurredAt.toUtc().toIso8601String(),
           'source': record.source,
           'deleted': false,
           'updated_at': now.toIso8601String(),

@@ -9,6 +9,7 @@ import '../../core/widgets/error_state_widget.dart';
 import '../../core/widgets/shimmer_loading.dart';
 import '../../data/local/app_database_provider.dart';
 import '../../data/repository/record_repository.dart';
+import '../../data/sync/sync_state_provider.dart';
 import '../record/record_screen.dart';
 import '../settings/budget_settings_screen.dart';
 import '../settings/budget_settings_provider.dart';
@@ -24,6 +25,15 @@ class HomeScreen extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final theme = Theme.of(context);
     final asyncData = ref.watch(homeDataProvider);
+    final syncState = ref.watch(syncStateProvider);
+
+    // 监听同步完成：弹 SnackBar 并重置状态
+    ref.listen<SyncState>(syncStateProvider, (prev, next) {
+      if (next.isDone && next.message != null) {
+        SnackbarUtils.show(context: context, message: next.message!);
+        Future.microtask(() => ref.read(syncStateProvider.notifier).reset());
+      }
+    });
 
     return Scaffold(
       appBar: AppBar(
@@ -38,6 +48,13 @@ class HomeScreen extends ConsumerWidget {
             ),
           ),
         ],
+        // 同步中：AppBar 底部显示不确定进度条
+        bottom: syncState.isSyncing
+            ? const PreferredSize(
+                preferredSize: Size.fromHeight(2),
+                child: LinearProgressIndicator(),
+              )
+            : null,
       ),
       body: asyncData.when(
         skipLoadingOnReload: true,   // 重新加载时保留旧数据，不闪骨架屏

@@ -597,10 +597,11 @@ class SyncQueueService {
           'type': row.type,
           'category_id': row.categoryId,
           'note': row.note,
-          'occurred_at': row.occurredAt.toIso8601String(),
+          // ⚑ toUtc()：对账重推时同样需要 UTC，否则 timestamptz 偏移 +8h
+          'occurred_at': row.occurredAt.toUtc().toIso8601String(),
           'source': row.source,
           'deleted': row.deleted,
-          'updated_at': row.updatedAt.toIso8601String(),
+          'updated_at': row.updatedAt.toUtc().toIso8601String(),
         });
       case 'accounts':
         final row = await (db.select(db.accounts)..where((t) => t.id.equals(recordId))).getSingleOrNull();

@@ -99,7 +99,7 @@ class CategoryDedupService {
           'type': record.type,
           'category_id': into.id,
           'note': record.note,
-          'occurred_at': record.occurredAt.toIso8601String(),
+          'occurred_at': record.occurredAt.toUtc().toIso8601String(),
           'source': record.source,
           'deleted': false,
           'updated_at': now.toUtc().toIso8601String(),
