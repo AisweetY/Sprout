@@ -217,6 +217,18 @@ class _AccountManageScreenState extends ConsumerState<AccountManageScreen> {
                         }
                         return;
                       }
+                      // 同名同类型校验
+                      final dao = ref.read(accountDaoProvider);
+                      final isDuplicate = await dao.existsByName(name, type);
+                      if (isDuplicate) {
+                        if (ctx.mounted) {
+                          SnackbarUtils.showError(
+                            context: ctx,
+                            message: '已存在同类型账户「$name」',
+                          );
+                        }
+                        return;
+                      }
                       final repo = ref.read(accountRepositoryProvider);
                       final userId = ref.read(currentUserIdProvider);
                       await repo.createAccount(
@@ -313,8 +325,23 @@ class _AccountManageScreenState extends ConsumerState<AccountManageScreen> {
                       if (name.isEmpty) return;
                       final repo = ref.read(accountRepositoryProvider);
 
-                      // 更新名称和类型
+                      // 更新名称和类型（含同名同类型校验）
                       if (name != account.name || type != account.type) {
+                        final dao = ref.read(accountDaoProvider);
+                        final isDuplicate = await dao.existsByName(
+                          name,
+                          type,
+                          excludeId: account.id,
+                        );
+                        if (isDuplicate) {
+                          if (ctx.mounted) {
+                            SnackbarUtils.showError(
+                              context: ctx,
+                              message: '已存在同类型账户「$name」',
+                            );
+                          }
+                          return;
+                        }
                         await repo.updateNameAndType(account.id, name, type);
                       }
 

@@ -37,6 +37,31 @@ class AccountDao extends DatabaseAccessor<AppDatabase> with _$AccountDaoMixin {
     return (select(db.accounts)..where((t) => t.id.equals(id) & t.deleted.equals(false))).getSingleOrNull();
   }
 
+  /// 检查同名同类型账户是否已存在（用于重名校验）
+  ///
+  /// 仅检查活跃账户（未删除、未归档）。
+  /// [excludeId] 编辑时传入当前账户 ID，以排除自身。
+  Future<bool> existsByName(
+    String name,
+    String type, {
+    String? excludeId,
+  }) async {
+    final rows = await (select(db.accounts)
+          ..where((t) {
+            var expr = t.name.equals(name) &
+                t.type.equals(type) &
+                t.deleted.equals(false) &
+                t.isArchived.equals(false);
+            if (excludeId != null) {
+              expr = expr & t.id.equals(excludeId).not();
+            }
+            return expr;
+          })
+          ..limit(1))
+        .get();
+    return rows.isNotEmpty;
+  }
+
   /// 插入账户
   Future<void> insertAccount(Insertable<Account> account) {
     return into(db.accounts).insert(account);
