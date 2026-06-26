@@ -27,26 +27,29 @@ class HomeScreen extends ConsumerWidget {
     final asyncData = ref.watch(homeDataProvider);
     final syncState = ref.watch(syncStateProvider);
 
-    // 同步完成后：等 homeDataProvider 数据刷新 → 弹 SnackBar → 收进度条
-    void onSyncDone(String msg) {
-      ref.read(homeDataProvider.future).then((_) {
-        if (context.mounted) {
+    // 同步完成 → 立即弹 SnackBar + 收进度条
+    // 注意：不等 homeDataProvider.future，因为该 provider 订阅多个 Stream，
+    // 同步期间 DB 频繁写入会持续 invalidate → 旧 future 被 Riverpod 取消 →
+    // .then() 永远不触发 → 进度条卡住无法收起。
+    ref.listen<SyncState>(syncStateProvider, (prev, next) {
+      if (next.isDone && next.message != null && context.mounted) {
+        SnackbarUtils.show(context: context, message: next.message!);
+        ref.read(syncStateProvider.notifier).reset();
+      }
+    });
+
+    // 补偿：若首次构建时已是 done（同步快于 widget 构建），listener 不会触发。
+    // 用 addPostFrameCallback 延迟执行，避免在 build 阶段直接触发 Riverpod 状态变更。
+    if (syncState.isDone && syncState.message != null) {
+      final msg = syncState.message!;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!context.mounted) return;
+        // listener 可能已先一步 reset，避免重复执行
+        if (ref.read(syncStateProvider).isDone) {
           SnackbarUtils.show(context: context, message: msg);
           ref.read(syncStateProvider.notifier).reset();
         }
-      }).catchError((_) {
-        // homeDataProvider 报错也要收起进度条
-        if (context.mounted) ref.read(syncStateProvider.notifier).reset();
       });
-    }
-
-    ref.listen<SyncState>(syncStateProvider, (prev, next) {
-      if (next.isDone && next.message != null) onSyncDone(next.message!);
-    });
-
-    // 补偿：若首次构建时已是 done（同步快于 widget 构建），listener 不会触发
-    if (syncState.isDone && syncState.message != null) {
-      onSyncDone(syncState.message!);
     }
 
     return Scaffold(
