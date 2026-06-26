@@ -27,11 +27,20 @@ class HomeScreen extends ConsumerWidget {
     final asyncData = ref.watch(homeDataProvider);
     final syncState = ref.watch(syncStateProvider);
 
-    // 监听同步完成：弹 SnackBar 并重置状态
+    // 监听同步完成：等 homeDataProvider 数据刷新完成后再弹 SnackBar 并收起进度条
+    // —— 避免「进度条消失了但数据还没刷新出来」的体验割裂
     ref.listen<SyncState>(syncStateProvider, (prev, next) {
       if (next.isDone && next.message != null) {
-        SnackbarUtils.show(context: context, message: next.message!);
-        Future.microtask(() => ref.read(syncStateProvider.notifier).reset());
+        final msg = next.message!;
+        ref.read(homeDataProvider.future).then((_) {
+          if (context.mounted) {
+            SnackbarUtils.show(context: context, message: msg);
+            ref.read(syncStateProvider.notifier).reset();
+          }
+        }).catchError((_) {
+          // homeDataProvider 报错也要收起进度条
+          if (context.mounted) ref.read(syncStateProvider.notifier).reset();
+        });
       }
     });
 
@@ -48,8 +57,8 @@ class HomeScreen extends ConsumerWidget {
             ),
           ),
         ],
-        // 同步中：AppBar 底部显示不确定进度条
-        bottom: syncState.isSyncing
+        // 同步中 OR 等待数据刷新（done 阶段）都显示进度条，直到 reset 为 idle
+        bottom: syncState.phase != SyncPhase.idle
             ? const PreferredSize(
                 preferredSize: Size.fromHeight(2),
                 child: LinearProgressIndicator(),

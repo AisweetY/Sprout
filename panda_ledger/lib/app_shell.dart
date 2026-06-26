@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 
 import 'core/services/text_recognition/edge_function_ai_service.dart';
 import 'data/category_dedup_service.dart';
@@ -99,8 +100,12 @@ class _AppShellState extends ConsumerState<AppShell>
 
     final syncService = ref.read(syncQueueServiceProvider);
 
-    // 同步开始：显示进度指示器
-    ref.read(syncStateProvider.notifier).start();
+    // 仅登录用户才展示同步进度；本地模式下无网络同步，不显示
+    final hasLoggedInUser =
+        Supabase.instance.client.auth.currentUser != null;
+    if (hasLoggedInUser) {
+      ref.read(syncStateProvider.notifier).start();
+    }
 
     try {
       // 1. 先从 Supabase 拉取远端数据（新设备恢复 / 增量同步）
@@ -157,13 +162,16 @@ class _AppShellState extends ConsumerState<AppShell>
         debugPrint('会员状态刷新失败: $e');
       });
 
-      // 同步完成：通知 UI
-      if (mounted) {
+      // 同步完成：通知 UI（仅登录用户）
+      // 进度条会持续到 homeDataProvider 数据刷新完成后才收起（见 home_screen）
+      if (hasLoggedInUser && mounted) {
         ref.read(syncStateProvider.notifier).done('数据同步完成');
       }
     } catch (e) {
       debugPrint('初始化异常: $e');
-      if (mounted) ref.read(syncStateProvider.notifier).reset();
+      if (hasLoggedInUser && mounted) {
+        ref.read(syncStateProvider.notifier).reset();
+      }
     }
   }
 
