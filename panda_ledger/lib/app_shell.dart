@@ -4,6 +4,8 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 
 import 'core/services/text_recognition/edge_function_ai_service.dart';
 import 'data/category_dedup_service.dart';
+import 'data/local/app_database_provider.dart';
+import 'data/local/dao/sync_metadata_dao.dart';
 import 'data/local/seed_service.dart';
 import 'data/sync/sync_queue_dao_provider.dart';
 import 'data/sync/sync_state_provider.dart';
@@ -100,10 +102,15 @@ class _AppShellState extends ConsumerState<AppShell>
 
     final syncService = ref.read(syncQueueServiceProvider);
 
-    // 仅登录用户才展示同步进度；本地模式下无网络同步，不显示
+    // 仅"刚登录"（首次全量同步）时显示进度；已登录的普通启动静默同步
+    // 判断依据：initial_sync_done 标记未设置说明还没做过初始同步
     final hasLoggedInUser =
         Supabase.instance.client.auth.currentUser != null;
-    if (hasLoggedInUser) {
+    final metadataDao = SyncMetadataDao(ref.read(appDatabaseProvider));
+    final isFirstSync =
+        hasLoggedInUser && !(await metadataDao.hasDoneInitialSync());
+
+    if (isFirstSync) {
       ref.read(syncStateProvider.notifier).start();
     }
 
@@ -162,14 +169,14 @@ class _AppShellState extends ConsumerState<AppShell>
         debugPrint('会员状态刷新失败: $e');
       });
 
-      // 同步完成：通知 UI（仅登录用户）
+      // 同步完成：通知 UI（仅刚登录时）
       // 进度条会持续到 homeDataProvider 数据刷新完成后才收起（见 home_screen）
-      if (hasLoggedInUser && mounted) {
+      if (isFirstSync && mounted) {
         ref.read(syncStateProvider.notifier).done('数据同步完成');
       }
     } catch (e) {
       debugPrint('初始化异常: $e');
-      if (hasLoggedInUser && mounted) {
+      if (isFirstSync && mounted) {
         ref.read(syncStateProvider.notifier).reset();
       }
     }
