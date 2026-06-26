@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import 'core/services/text_recognition/edge_function_ai_service.dart';
+import 'data/account_dedup_service.dart';
 import 'data/category_dedup_service.dart';
 import 'data/local/app_database_provider.dart';
 import 'data/local/dao/sync_metadata_dao.dart';
@@ -72,11 +73,14 @@ class _AppShellState extends ConsumerState<AppShell>
     }
   }
 
-  /// 从后台恢复：pull → process 顺序执行，避免竞态
+  /// 从后台恢复：pull → dedup → process 顺序执行，避免竞态
   Future<void> _onResumed() async {
     final syncService = ref.read(syncQueueServiceProvider);
     try {
       await syncService.pullFromSupabase();
+      // pull 可能拉取云端数据与本地 seed 产生同名重复 → 去重后再推送
+      await ref.read(categoryDedupServiceProvider).deduplicateOnce().catchError((_) => 0);
+      await ref.read(accountDedupServiceProvider).deduplicateOnce().catchError((_) => 0);
       await syncService.processQueue();
     } catch (_) {}
     // 会员状态刷新放在同步之后（获取最新过期时间）
@@ -145,11 +149,18 @@ class _AppShellState extends ConsumerState<AppShell>
       }
       if (!mounted) return;
 
-      // 2.5 历史重名分类一次性去重（命中时才有实际工作，未命中仅一次 SQL 查询）
+      // 2.5 去重：分类 + 账户（本地 seed 与云端拉取数据同名时自动合并）
+      // 分类去重：合并同 kind+name 的一级分类，迁移子分类和流水
       try {
         await ref.read(categoryDedupServiceProvider).deduplicateOnce();
       } catch (e) {
         debugPrint('分类去重失败: $e');
+      }
+      // 账户去重：合并同 name+type 的账户，迁移引用该账户的流水
+      try {
+        await ref.read(accountDedupServiceProvider).deduplicateOnce();
+      } catch (e) {
+        debugPrint('账户去重失败: $e');
       }
       if (!mounted) return;
 
