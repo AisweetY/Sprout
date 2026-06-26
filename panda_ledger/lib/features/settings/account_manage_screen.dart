@@ -211,7 +211,12 @@ class _AccountManageScreenState extends ConsumerState<AccountManageScreen> {
                     onPressed: () async {
                       final name = nameCtrl.text.trim();
                       final balance = double.tryParse(balanceCtrl.text) ?? 0;
-                      if (name.isEmpty) return;
+                      if (name.isEmpty) {
+                        if (ctx.mounted) {
+                          SnackbarUtils.showError(context: ctx, message: '请输入账户名称');
+                        }
+                        return;
+                      }
                       final repo = ref.read(accountRepositoryProvider);
                       final userId = ref.read(currentUserIdProvider);
                       await repo.createAccount(
@@ -547,7 +552,7 @@ class _AccountTile extends StatelessWidget {
     final isArchived = account.isArchived;
 
     return Card(
-      margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+      margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
       child: ListTile(
         onTap: onTap,
         onLongPress: onLongPress,

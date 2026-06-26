@@ -1,4 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:panda_ledger/core/models/time_dimension.dart';
 import 'package:panda_ledger/features/insights/insights_provider.dart';
 
 void main() {

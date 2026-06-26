@@ -2,6 +2,7 @@ import 'package:drift/drift.dart' show Variable;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../core/models/time_dimension.dart';
 import '../../data/local/app_database_provider.dart';
 import '../../data/local/database.dart';
 import '../../data/repository/account_repository.dart';
@@ -351,8 +352,8 @@ Future<List<SnapshotPoint>> _computeCustomSnapshots(
     // 短范围：按日聚合
     return _computeDailyRangeSnapshots(db, currentNetWorth, start, end);
   } else if (duration <= 366) {
-    // 中等范围：按周聚合
-    return _computeWeekRangeSnapshots(db, currentNetWorth, start, end);
+    // 中等范围：暂按月聚合（周聚合待实现）
+    return _computeMonthRangeSnapshots(db, currentNetWorth, start, end);
   } else {
     // 长范围：按月聚合
     return _computeMonthRangeSnapshots(db, currentNetWorth, start, end);
@@ -403,13 +404,6 @@ Future<List<SnapshotPoint>> _computeDailyRangeSnapshots(
   return result;
 }
 
-Future<List<SnapshotPoint>> _computeWeekRangeSnapshots(
-  AppDatabase db, double currentNetWorth, DateTime start, DateTime end,
-) async {
-  // 简化为按月聚合
-  return _computeMonthRangeSnapshots(db, currentNetWorth, start, end);
-}
-
 Future<List<SnapshotPoint>> _computeMonthRangeSnapshots(
   AppDatabase db, double currentNetWorth, DateTime start, DateTime end,
 ) async {
@@ -442,9 +436,6 @@ Future<List<SnapshotPoint>> _computeMonthRangeSnapshots(
   }
   return result;
 }
-
-/// 时间维度枚举（与 insights 保持一致）
-enum TimeDimension { day, week, month, year, custom }
 
 class AssetsData {
   final double totalAssets;

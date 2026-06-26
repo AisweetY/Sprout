@@ -4,6 +4,7 @@ import 'package:drift/drift.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../core/utils/error_logger.dart';
 import '../../core/utils/id_generator.dart';
 import '../local/app_database_provider.dart';
 import '../local/dao/account_dao.dart';
@@ -124,12 +125,14 @@ class RecordRepository {
 
         // ═══ 网络推送：不阻塞返回 ═══
         debugPrint('🟡 [同步链路-节点3] 开始触发同步队列 processQueue()...');
-        syncQueue.processQueue().catchError((e) {
+        syncQueue.processQueue().catchError((e, s) {
+          ErrorLogger.log('记录创建同步推送失败', e, s);
           debugPrint('🔴 [同步链路-节点3] 同步队列处理异常: $e');
         });
 
         return id;
-      } catch (e) {
+      } catch (e, s) {
+        ErrorLogger.log('记录创建本地写入失败', e, s);
         debugPrint('🔴 [同步链路-节点1/2] insert 异常: $e');
         // 仅在 UNIQUE 约束冲突时重试；其他异常直接抛出
         if (e.toString().contains('UNIQUE constraint failed') &&
@@ -324,7 +327,8 @@ class RecordRepository {
     });
 
     // ═══ 网络推送：transaction 提交成功后再触发，不阻塞返回 ═══
-    syncQueue.processQueue().catchError((e) {
+    syncQueue.processQueue().catchError((e, s) {
+      ErrorLogger.log('updateRecord同步推送失败', e, s);
       debugPrint('🔴 [同步链路] updateRecord 同步推送失败: $e');
     });
   }
@@ -367,7 +371,8 @@ class RecordRepository {
     });
 
     // ═══ 网络推送：transaction 提交成功后再触发 ═══
-    syncQueue.processQueue().catchError((e) {
+    syncQueue.processQueue().catchError((e, s) {
+      ErrorLogger.log('deleteRecord同步推送失败', e, s);
       debugPrint('🔴 [同步链路] deleteRecord 同步推送失败: $e');
     });
   }
@@ -408,7 +413,8 @@ class RecordRepository {
       );
     });
 
-    syncQueue.processQueue().catchError((e) {
+    syncQueue.processQueue().catchError((e, s) {
+      ErrorLogger.log('restoreRecord同步推送失败', e, s);
       debugPrint('🔴 [同步链路] restoreRecord 同步推送失败: $e');
     });
   }

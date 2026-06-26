@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../core/models/time_dimension.dart';
 import '../../core/theme/colors.dart';
 import '../../core/utils/accessibility_utils.dart';
 import '../../core/widgets/error_state_widget.dart';
@@ -157,7 +158,7 @@ class _DimensionSelector extends StatelessWidget {
             child: Padding(
               padding: EdgeInsets.only(left: item.$1 == TimeDimension.day ? 0 : 4),
               child: SizedBox(
-                height: 36,
+                height: 44,
                 child: Material(
                   color: isSelected
                       ? theme.colorScheme.secondaryContainer
@@ -473,7 +474,7 @@ class _CustomNav extends StatelessWidget {
           ),
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 8),
-            child: Text('→', style: theme.textTheme.titleMedium),
+            child: Icon(Icons.arrow_forward_rounded, size: 20, color: theme.colorScheme.onSurfaceVariant),
           ),
           InkWell(
             onTap: () async {
@@ -568,7 +569,7 @@ class _ConclusionCard extends ConsumerWidget {
             switch (aiState.status) {
               AiSummaryStatus.idle => _buildIdle(context, ref, data),
               AiSummaryStatus.loading => _buildLoading(context),
-              AiSummaryStatus.done => _buildDone(context, ref, data, aiState.text!),
+              AiSummaryStatus.done => _buildDone(context, ref, data, aiState.result!),
               AiSummaryStatus.error => _buildError(context, ref, data, aiState.errorMsg ?? '未知错误'),
             },
           ],
@@ -636,18 +637,140 @@ class _ConclusionCard extends ConsumerWidget {
     );
   }
 
-  /// 已生成状态
+  /// 已生成状态 — A+C+B 融合布局
   Widget _buildDone(
     BuildContext context,
     WidgetRef ref,
     InsightsData data,
-    String summary,
+    AiSummaryResult result,
   ) {
+    final cs = theme.colorScheme;
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(summary, style: theme.textTheme.bodyLarge?.copyWith(height: 1.7)),
+        // ── 用户分群标签行 ──
+        Row(
+          crossAxisAlignment: CrossAxisAlignment.center,
+          children: [
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 3),
+              decoration: BoxDecoration(
+                color: cs.secondaryContainer,
+                borderRadius: BorderRadius.circular(20),
+              ),
+              child: Text(
+                result.userTag,
+                style: theme.textTheme.labelSmall?.copyWith(
+                  color: cs.onSecondaryContainer,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ),
+            if (result.tagDesc.isNotEmpty) ...[
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  result.tagDesc,
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: cs.onSurfaceVariant,
+                  ),
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+            ],
+          ],
+        ),
         const SizedBox(height: 12),
+
+        // ── 开篇定调（C 叙事感）──
+        Text(
+          result.opening,
+          style: theme.textTheme.bodyMedium?.copyWith(
+            color: cs.onSurfaceVariant,
+            fontStyle: FontStyle.italic,
+            height: 1.55,
+          ),
+        ),
+        const Padding(
+          padding: EdgeInsets.symmetric(vertical: 14),
+          child: Divider(height: 1),
+        ),
+
+        // ── 论点式洞察（A 结构）——结论在前，数据做证据 ──
+        ...result.insights.map(
+          (item) => Padding(
+            padding: const EdgeInsets.only(bottom: 12),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Padding(
+                  padding: const EdgeInsets.only(top: 4, right: 10),
+                  child: Icon(
+                    Icons.diamond_outlined,
+                    size: 11,
+                    color: cs.primary.withAlpha(200),
+                  ),
+                ),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        item.conclusion,
+                        style: theme.textTheme.bodyMedium?.copyWith(
+                          fontWeight: FontWeight.w600,
+                          height: 1.4,
+                        ),
+                      ),
+                      const SizedBox(height: 3),
+                      Text(
+                        item.detail,
+                        style: theme.textTheme.bodySmall?.copyWith(
+                          color: cs.onSurfaceVariant,
+                          height: 1.6,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+
+        // ── 最大问题聚焦（B 历史对比）——可选 ──
+        if (result.focus != null) ...[
+          const SizedBox(height: 2),
+          _FocusBlock(focus: result.focus!, theme: theme),
+          const SizedBox(height: 10),
+        ] else
+          const SizedBox(height: 2),
+
+        // ── 行动建议（目标导向）──
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+          decoration: BoxDecoration(
+            color: cs.surfaceContainerHighest,
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Icon(Icons.lightbulb_outline, size: 16, color: cs.primary),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  result.advice,
+                  style: theme.textTheme.bodyMedium?.copyWith(height: 1.5),
+                ),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 8),
+
+        // ── 重新生成 ──
         Align(
           alignment: Alignment.centerRight,
           child: TextButton.icon(
@@ -719,6 +842,7 @@ class _ConclusionCard extends ConsumerWidget {
       }
     }).catchError((e) {
       debugPrint('⚠️ 准备 AI 小结数据失败: $e');
+      ref.read(aiSummaryProvider.notifier).setError('数据准备失败，请稍后重试');
     });
   }
 }
@@ -936,6 +1060,70 @@ class _CompareRow extends StatelessWidget {
               fontWeight: FontWeight.w500,
             )),
       ],
+    );
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// AI 小结子组件
+// ═══════════════════════════════════════════════════════════════
+
+/// 最大问题聚焦块（来自 B 方案：最大问题 + 历史对比）
+class _FocusBlock extends StatelessWidget {
+  final AiSummaryFocus focus;
+  final ThemeData theme;
+
+  const _FocusBlock({required this.focus, required this.theme});
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = theme.colorScheme;
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        color: cs.tertiaryContainer.withAlpha(140),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: cs.tertiary.withAlpha(50)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(Icons.bolt_rounded, size: 13, color: cs.tertiary),
+              const SizedBox(width: 4),
+              Text(
+                '最值得关注',
+                style: theme.textTheme.labelSmall?.copyWith(
+                  color: cs.tertiary,
+                  fontWeight: FontWeight.w700,
+                  letterSpacing: 0.3,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 5),
+          Text(
+            focus.problem,
+            style: theme.textTheme.bodyMedium?.copyWith(
+              color: cs.onTertiaryContainer,
+              fontWeight: FontWeight.w600,
+              height: 1.4,
+            ),
+          ),
+          if (focus.vsHistory.isNotEmpty) ...[
+            const SizedBox(height: 2),
+            Text(
+              focus.vsHistory,
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: cs.onTertiaryContainer.withAlpha(180),
+                height: 1.5,
+              ),
+            ),
+          ],
+        ],
+      ),
     );
   }
 }

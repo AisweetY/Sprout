@@ -211,7 +211,12 @@ class _BudgetSettingsScreenState extends ConsumerState<BudgetSettingsScreen> {
               FilledButton(
                 onPressed: () async {
                   final amount = double.tryParse(amountCtrl.text.trim());
-                  if (amount == null || amount <= 0) return;
+                  if (amount == null || amount <= 0) {
+                    if (mounted) {
+                      SnackbarUtils.showError(context: context, message: '请输入有效金额');
+                    }
+                    return;
+                  }
 
                   final budgetDao = ref.read(budgetDaoProvider);
                   final monthStr =

@@ -25,13 +25,6 @@ class AccountDao extends DatabaseAccessor<AppDatabase> with _$AccountDaoMixin {
         .get();
   }
 
-  /// 按类型获取账户
-  Future<List<Account>> getAccountsByType(String type) {
-    return (select(db.accounts)
-          ..where((t) => t.type.equals(type) & t.isArchived.equals(false) & t.deleted.equals(false)))
-        .get();
-  }
-
   /// 获取计入总资产的账户
   Future<List<Account>> getNetWorthAccounts() {
     return (select(db.accounts)

@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../core/models/time_dimension.dart';
 import '../../core/utils/accessibility_utils.dart';
 import '../../core/widgets/error_state_widget.dart';
 import '../../core/widgets/shimmer_loading.dart';
@@ -228,7 +229,7 @@ class _DimensionSelector extends StatelessWidget {
             child: Padding(
               padding: EdgeInsets.only(left: item.$1 == TimeDimension.day ? 0 : 4),
               child: SizedBox(
-                height: 36,
+                height: 44,
                 child: Material(
                   color: isSelected
                       ? theme.colorScheme.secondaryContainer
@@ -308,7 +309,7 @@ class _CustomDateRange extends StatelessWidget {
           ),
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 8),
-            child: Text('→', style: theme.textTheme.titleMedium),
+            child: Icon(Icons.arrow_forward_rounded, size: 20, color: theme.colorScheme.onSurfaceVariant),
           ),
           InkWell(
             onTap: () async {

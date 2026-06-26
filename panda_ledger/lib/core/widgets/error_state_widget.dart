@@ -93,9 +93,10 @@ class _ErrorStateWidgetState extends State<ErrorStateWidget> {
                 shape: BoxShape.circle,
               ),
               child: Center(
-                child: Text(
-                  '🐼',
-                  style: TextStyle(fontSize: 40),
+                child: Icon(
+                  Icons.sentiment_dissatisfied_rounded,
+                  size: 40,
+                  color: theme.colorScheme.primary,
                 ),
               ),
             ),
@@ -115,7 +116,7 @@ class _ErrorStateWidgetState extends State<ErrorStateWidget> {
               widget.message,
               textAlign: TextAlign.center,
               style: theme.textTheme.bodyMedium?.copyWith(
-                color: theme.colorScheme.onSurface.withAlpha(153),
+              color: theme.colorScheme.onSurfaceVariant,
               ),
             ),
             const SizedBox(height: 24),

@@ -444,7 +444,14 @@ class _HistoryScreenState extends ConsumerState<HistoryScreen> {
                       SizedBox(
                         height: MediaQuery.of(context).size.height * 0.4,
                         child: Center(
-                          child: Text('暂无记录', style: theme.textTheme.bodyMedium),
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(Icons.receipt_long_outlined, size: 48, color: theme.colorScheme.onSurfaceVariant.withAlpha(100)),
+                              const SizedBox(height: 12),
+                              Text('暂无记录', style: theme.textTheme.bodyMedium),
+                            ],
+                          ),
                         ),
                       ),
                     ],
@@ -528,7 +535,7 @@ class _DayHeader extends StatelessWidget {
       child: Text(
         '${date.month}月${date.day}日 周${weekdayNames[date.weekday - 1]}',
         style: theme.textTheme.labelMedium?.copyWith(
-          color: theme.colorScheme.primary,
+          color: theme.colorScheme.onSurfaceVariant,
           fontWeight: FontWeight.w600,
         ),
       ),

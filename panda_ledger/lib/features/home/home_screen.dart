@@ -27,22 +27,27 @@ class HomeScreen extends ConsumerWidget {
     final asyncData = ref.watch(homeDataProvider);
     final syncState = ref.watch(syncStateProvider);
 
-    // 监听同步完成：等 homeDataProvider 数据刷新完成后再弹 SnackBar 并收起进度条
-    // —— 避免「进度条消失了但数据还没刷新出来」的体验割裂
+    // 同步完成后：等 homeDataProvider 数据刷新 → 弹 SnackBar → 收进度条
+    void onSyncDone(String msg) {
+      ref.read(homeDataProvider.future).then((_) {
+        if (context.mounted) {
+          SnackbarUtils.show(context: context, message: msg);
+          ref.read(syncStateProvider.notifier).reset();
+        }
+      }).catchError((_) {
+        // homeDataProvider 报错也要收起进度条
+        if (context.mounted) ref.read(syncStateProvider.notifier).reset();
+      });
+    }
+
     ref.listen<SyncState>(syncStateProvider, (prev, next) {
-      if (next.isDone && next.message != null) {
-        final msg = next.message!;
-        ref.read(homeDataProvider.future).then((_) {
-          if (context.mounted) {
-            SnackbarUtils.show(context: context, message: msg);
-            ref.read(syncStateProvider.notifier).reset();
-          }
-        }).catchError((_) {
-          // homeDataProvider 报错也要收起进度条
-          if (context.mounted) ref.read(syncStateProvider.notifier).reset();
-        });
-      }
+      if (next.isDone && next.message != null) onSyncDone(next.message!);
     });
+
+    // 补偿：若首次构建时已是 done（同步快于 widget 构建），listener 不会触发
+    if (syncState.isDone && syncState.message != null) {
+      onSyncDone(syncState.message!);
+    }
 
     return Scaffold(
       appBar: AppBar(
@@ -138,7 +143,7 @@ class _NetSavingCard extends StatelessWidget {
             ),
           ),
         child: Padding(
-          padding: const EdgeInsets.all(20),
+          padding: const EdgeInsets.all(24),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
@@ -368,7 +373,14 @@ class _DailyRecordsSection extends ConsumerWidget {
           Container(
             padding: const EdgeInsets.symmetric(vertical: 32),
             alignment: Alignment.center,
-            child: Text('记一笔，看看钱都花在哪', style: theme.textTheme.bodyMedium),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(Icons.edit_note_rounded, size: 48, color: theme.colorScheme.onSurfaceVariant.withAlpha(100)),
+                const SizedBox(height: 12),
+                Text('记一笔，看看钱都花在哪', style: theme.textTheme.bodyMedium),
+              ],
+            ),
           )
         else
           ...data.dailyGroups.map((group) => _DayGroup(

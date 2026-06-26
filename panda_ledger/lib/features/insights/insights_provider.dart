@@ -2,6 +2,7 @@ import 'package:drift/drift.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../core/models/time_dimension.dart';
 import '../../data/local/app_database_provider.dart';
 import '../../data/local/database.dart';
 import '../../data/repository/account_repository.dart';
@@ -20,9 +21,6 @@ void _watchRelevantMonths(Ref ref, DateTime start, DateTime end) {
     ref.watch(monthlyRecordsStreamProvider((year: m.year, month: m.month)));
   }
 }
-
-/// 时间维度枚举
-enum TimeDimension { day, week, month, year, custom }
 
 /// 分析页时间参数
 class InsightsParams {
@@ -237,6 +235,9 @@ class AiSummaryInput {
   final double? historicalAvgExpense;
   final String? budgetStatus;
 
+  /// 建议锚点：App 端精确计算的数字，AI 写 advice 只能用这些
+  final AdviceHints adviceHints;
+
   const AiSummaryInput({
     required this.dimensionName,
     required this.periodLabel,
@@ -253,6 +254,7 @@ class AiSummaryInput {
     this.assets,
     this.historicalAvgExpense,
     this.budgetStatus,
+    required this.adviceHints,
   });
 
   Map<String, dynamic> toJson() => {
@@ -271,6 +273,7 @@ class AiSummaryInput {
         'assets': assets?.toJson(),
         'historical_avg_expense': historicalAvgExpense,
         'budget_status': budgetStatus,
+        'advice_hints': adviceHints.toJson(),
       };
 }
 
@@ -316,6 +319,42 @@ class AssetRatioData {
   Map<String, dynamic> toJson() => {
         'cash_ratio': cashRatio,
         'invest_ratio': investRatio,
+      };
+}
+
+/// 建议锚点 — App 端精确计算，AI 只能用这些数字写 advice，不得编造
+class AdviceHints {
+  /// 目标达成情况描述（Flutter 端算好，AI 直接引用）
+  ///
+  /// 样例：
+  /// - "已超额完成，存了 ¥2,300"
+  /// - "当前完成 72%，按节奏预计最终完成约 85%，本月难达标"
+  /// - "当前完成 72%，按节奏能达标"
+  /// - "周期已结束，完成 68%，差 ¥640"
+  /// - null → 无储蓄目标
+  final String? goalStatus;
+
+  /// 本期环比增幅最大的支出分类名（两期都有数据才算）
+  final String? topGainCategory;
+
+  /// 该分类比上期多花了多少（绝对值）
+  final double? topGainAmount;
+
+  /// 当前周期剩余天数（0 = 周期已结束，建议面向下期）
+  final int daysRemainingInPeriod;
+
+  const AdviceHints({
+    this.goalStatus,
+    this.topGainCategory,
+    this.topGainAmount,
+    required this.daysRemainingInPeriod,
+  });
+
+  Map<String, dynamic> toJson() => {
+        'goal_status': goalStatus,
+        'top_gain_category': topGainCategory,
+        'top_gain_amount': topGainAmount,
+        'days_remaining': daysRemainingInPeriod,
       };
 }
 
@@ -496,6 +535,7 @@ Future<AiSummaryInput> prepareAiSummaryInput(
   final recordDao = ref.read(recordDaoProvider);
   final accountRepo = ref.read(accountRepositoryProvider);
   final budgetDao = ref.read(budgetDaoProvider);
+  final categoryDao = ref.read(categoryDaoProvider);
 
   // ── 1. TOP 3 分类（含上期对比）──
   final prevParams = params.previousPeriod;
@@ -540,6 +580,12 @@ Future<AiSummaryInput> prepareAiSummaryInput(
       maxCount = entry.value;
       highFreqCatId = entry.key;
     }
+  }
+  // categoryId 是 UUID，AI 无法理解 → 查出人类可读的分类名称
+  String? highFreqCatName;
+  if (highFreqCatId != null) {
+    final cat = await categoryDao.getById(highFreqCatId);
+    highFreqCatName = cat?.name;
   }
 
   // ── 4. 历史月均支出（过去 6 个月）──
@@ -598,6 +644,7 @@ Future<AiSummaryInput> prepareAiSummaryInput(
 
   // ── 6. 预算状态 ──
   String? budgetStatus;
+
   final monthStr = '${params.start.year}-${params.start.month.toString().padLeft(2, '0')}';
   final savingGoal = await budgetDao.getMonthlySavingGoal(monthStr);
   if (savingGoal != null && savingGoal.targetAmount > 0) {
@@ -605,9 +652,68 @@ Future<AiSummaryInput> prepareAiSummaryInput(
     budgetStatus = '月度储蓄目标 ¥${savingGoal.targetAmount.toStringAsFixed(0)}，当前达成 ${progress.toStringAsFixed(0)}%';
   }
 
+  // ── 7. 当前周期剩余天数 ──
+  // .inDays 向下截断，周期最后一天（<24h 剩余）会返回 0，导致误判"周期已结束"。
+  // 改用 ceiling 除法：只要还有 ≥1 秒剩余，就算 1 天。
+  final nowForHints = DateTime.now();
+  final daysRemaining = params.end.isAfter(nowForHints)
+      ? (params.end.difference(nowForHints).inHours + 23) ~/ 24
+      : 0;
+
+  // ── 8. 目标达成情况预估（Flutter 端算好，AI 直接引用，不需要 AI 自己估算）──
+  String? goalStatus;
+  if (savingGoal != null && savingGoal.targetAmount > 0) {
+    final goal = savingGoal.targetAmount;
+    final saved = data.netSaving;
+    final pct = (saved / goal * 100).clamp(0.0, 100.0);
+
+    if (saved >= goal) {
+      // 已超额
+      goalStatus = '已超额完成，存了 ¥${saved.toStringAsFixed(0)}（目标 ¥${goal.toStringAsFixed(0)}）';
+    } else if (daysRemaining == 0) {
+      // 周期已结束，算最终结果
+      goalStatus = '周期已结束，完成 ${pct.toStringAsFixed(0)}%，差 ¥${(goal - saved).toStringAsFixed(0)} 未达标';
+    } else {
+      // 按当前日均净存入预测最终结果
+      final totalDays = params.end.difference(params.start).inDays;
+      final daysElapsed = (totalDays - daysRemaining).clamp(1, totalDays);
+      final dailyNetSaving = saved / daysElapsed;
+      final projected = saved + dailyNetSaving * daysRemaining;
+      final projectedPct = (projected / goal * 100).clamp(0.0, 100.0);
+
+      if (projected >= goal) {
+        goalStatus = '当前完成 ${pct.toStringAsFixed(0)}%，按当前节奏能达标';
+      } else {
+        goalStatus = '当前完成 ${pct.toStringAsFixed(0)}%，按当前节奏预计完成约 ${projectedPct.toStringAsFixed(0)}%，本月难达标';
+      }
+    }
+  }
+
+  // ── 9. 建议锚点：环比增幅最大的支出分类 ──
+  // 只统计上期也有数据的分类（防止新分类被误判为"超支"）
+  String? topGainCategory;
+  double topGainAmount = 0;
+  for (final r in data.rankings) {
+    final prevAmount = prevMap[r.name] ?? 0.0;
+    if (prevAmount > 0) {
+      final gain = r.amount - prevAmount;
+      if (gain > topGainAmount) {
+        topGainAmount = gain;
+        topGainCategory = r.name;
+      }
+    }
+  }
+
+  final adviceHints = AdviceHints(
+    goalStatus: goalStatus,
+    topGainCategory: topGainCategory,
+    topGainAmount: topGainAmount > 0 ? topGainAmount : null,
+    daysRemainingInPeriod: daysRemaining,
+  );
+
   return AiSummaryInput(
-    dimensionName: params.summaryTitle,  // "本月小结" / "本周小结" / ...
-    periodLabel: params.periodLabel,      // "2026年6月" / "6/16 - 6/22"
+    dimensionName: params.summaryTitle,
+    periodLabel: params.periodLabel,
     currentDate: DateTime.now().toIso8601String().substring(0, 10),
     income: data.income,
     expense: data.expense,
@@ -617,9 +723,10 @@ Future<AiSummaryInput> prepareAiSummaryInput(
     prevExpense: data.prevExpense,
     topCategories: topCategories,
     largeExpenses: largeExpenses,
-    highFrequencyCategory: highFreqCatId, // 后续可按需解析为名称
+    highFrequencyCategory: highFreqCatName,
     assets: assets,
     historicalAvgExpense: historicalAvgExpense,
     budgetStatus: budgetStatus,
+    adviceHints: adviceHints,
   );
 }

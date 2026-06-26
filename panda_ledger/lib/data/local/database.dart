@@ -40,6 +40,9 @@ part 'database.g.dart';
 class AppDatabase extends _$AppDatabase {
   AppDatabase() : super(_openConnection());
 
+  /// 测试用构造函数：接受外部传入的 [executor]（如内存数据库）
+  AppDatabase.test(QueryExecutor executor) : super(executor);
+
   @override
   int get schemaVersion => 2;
 

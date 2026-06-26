@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/constants.dart';
+import '../../core/utils/error_logger.dart';
 import '../../core/utils/id_generator.dart';
 import '../sync/sync_queue_dao_provider.dart';
 import 'app_database_provider.dart';
@@ -95,7 +96,8 @@ class SeedService {
       }
 
       // 种子数据全部写入后，异步推送到 Supabase
-      syncQueue.processQueue().catchError((e) {
+      syncQueue.processQueue().catchError((e, s) {
+        ErrorLogger.log('种子数据同步推送失败', e, s);
         debugPrint('🔴 [种子同步] processQueue 异常: $e');
       });
     } finally {
@@ -139,7 +141,8 @@ class SeedService {
         }),
       );
       debugPrint('🟢 [种子同步] 默认账户「现金」已入队: $id');
-    } catch (e) {
+    } catch (e, s) {
+      ErrorLogger.log('种子数据默认账户入队失败', e, s);
       debugPrint('🔴 [种子同步] 默认账户入队失败: $e');
     }
   }
@@ -178,7 +181,8 @@ class SeedService {
           'is_archived': false,
         }),
       );
-    } catch (e) {
+    } catch (e, s) {
+      ErrorLogger.log('种子数据分类入队失败', e, s);
       debugPrint('🔴 [种子同步] 分类「$name」入队失败: $e');
     }
   }

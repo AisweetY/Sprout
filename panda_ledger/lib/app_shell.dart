@@ -114,6 +114,9 @@ class _AppShellState extends ConsumerState<AppShell>
       ref.read(syncStateProvider.notifier).start();
     }
 
+    // 是否为真正新用户（云端无数据 + 本地无分类 → 仅需种子初始化，无需"同步"）
+    var wasNewUser = false;
+
     try {
       // 1. 先从 Supabase 拉取远端数据（新设备恢复 / 增量同步）
       try {
@@ -128,6 +131,12 @@ class _AppShellState extends ConsumerState<AppShell>
         final seedService = ref.read(seedServiceProvider);
         final needsSeeding = await seedService.needsSeeding();
         if (needsSeeding && mounted) {
+          wasNewUser = true;
+          // 新用户无需展示同步进度条：云端无数据，pull 几乎是瞬时完成
+          // 提前 reset 让进度条消失，后续 seed + push 静默执行
+          if (isFirstSync) {
+            ref.read(syncStateProvider.notifier).reset();
+          }
           final userId = ref.read(currentUserIdProvider);
           await seedService.seed(userId: userId);
         }
@@ -169,14 +178,15 @@ class _AppShellState extends ConsumerState<AppShell>
         debugPrint('会员状态刷新失败: $e');
       });
 
-      // 同步完成：通知 UI（仅刚登录时）
+      // 同步完成：通知 UI（仅刚登录 + 非新用户）
+      // 新用户（wasNewUser）已在 seed 阶段提前 reset，无需再次通知
       // 进度条会持续到 homeDataProvider 数据刷新完成后才收起（见 home_screen）
-      if (isFirstSync && mounted) {
+      if (isFirstSync && !wasNewUser && mounted) {
         ref.read(syncStateProvider.notifier).done('数据同步完成');
       }
     } catch (e) {
       debugPrint('初始化异常: $e');
-      if (isFirstSync && mounted) {
+      if (isFirstSync && !wasNewUser && mounted) {
         ref.read(syncStateProvider.notifier).reset();
       }
     }
@@ -266,7 +276,7 @@ class _RecordEntryCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Padding(
-      padding: const EdgeInsets.fromLTRB(12, 4, 12, 8),
+      padding: const EdgeInsets.fromLTRB(16, 4, 16, 8),
       child: Row(
         children: [
           // 主操作：记一笔

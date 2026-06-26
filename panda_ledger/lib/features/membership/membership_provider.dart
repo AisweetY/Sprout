@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
+import '../../core/utils/error_logger.dart';
 import 'membership_models.dart';
 
 // ─────────────────────────────────────────────
@@ -66,7 +67,8 @@ class MembershipNotifier extends StateNotifier<MembershipState> {
         // 已过期，清掉缓存
         await _clearCache(prefs);
       }
-    } catch (e) {
+    } catch (e, s) {
+      ErrorLogger.log('读取会员缓存失败', e, s);
       debugPrint('⚠️ 读取会员缓存失败: $e');
     }
   }
@@ -101,7 +103,8 @@ class MembershipNotifier extends StateNotifier<MembershipState> {
       final info = MembershipInfo.fromJson(res);
       state = MembershipState(info: info.isActive ? info : null);
       await _saveCache(info.isActive ? info : null);
-    } catch (e) {
+    } catch (e, s) {
+      ErrorLogger.log('刷新会员状态失败', e, s);
       debugPrint('⚠️ 刷新会员状态失败: $e');
       if (mounted) state = state.copyWith(loading: false);
     }

@@ -4,6 +4,8 @@ import 'package:flutter_timezone/flutter_timezone.dart';
 import 'package:timezone/data/latest_all.dart' as tzdata;
 import 'package:timezone/timezone.dart' as tz;
 
+import '../utils/error_logger.dart';
+
 /// 本地通知服务 — 每日记账提醒
 ///
 /// 使用 inexact 调度（[AndroidScheduleMode.inexactAllowWhileIdle]），
@@ -31,7 +33,8 @@ class NotificationService {
     try {
       final tzName = await FlutterTimezone.getLocalTimezone();
       tz.setLocalLocation(tz.getLocation(tzName));
-    } catch (e) {
+    } catch (e, s) {
+      ErrorLogger.log('通知时区初始化失败', e, s);
       debugPrint('🔴 [通知] 时区初始化失败，回退 UTC: $e');
     }
 

@@ -4,6 +4,7 @@ import 'package:drift/drift.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../core/utils/error_logger.dart';
 import '../../core/utils/id_generator.dart';
 import '../local/app_database_provider.dart';
 import '../local/dao/account_dao.dart';
@@ -84,7 +85,8 @@ class AccountRepository {
     });
 
     // ═══ 网络推送：transaction 提交成功后再触发 ═══
-    syncQueue.processQueue().catchError((e) {
+    syncQueue.processQueue().catchError((e, s) {
+      ErrorLogger.log('账户创建同步推送失败', e, s);
       debugPrint('🔴 [账户同步] processQueue 异常: $e');
     });
 
@@ -167,7 +169,8 @@ class AccountRepository {
     });
 
     // ═══ 网络推送：transaction 提交成功后再触发 ═══
-    syncQueue.processQueue().catchError((e) {
+    syncQueue.processQueue().catchError((e, s) {
+      ErrorLogger.log('correctBalance同步推送失败', e, s);
       debugPrint('🔴 [账户同步] correctBalance 同步推送失败: $e');
     });
   }
@@ -214,7 +217,8 @@ class AccountRepository {
       );
     });
 
-    syncQueue.processQueue().catchError((e) {
+    syncQueue.processQueue().catchError((e, s) {
+      ErrorLogger.log('updateNameAndType同步推送失败', e, s);
       debugPrint('🔴 [账户同步] updateNameAndType 同步推送失败: $e');
     });
   }
@@ -248,7 +252,8 @@ class AccountRepository {
       );
     });
 
-    syncQueue.processQueue().catchError((e) {
+    syncQueue.processQueue().catchError((e, s) {
+      ErrorLogger.log('archive/unarchive同步推送失败', e, s);
       debugPrint('🔴 [账户同步] archive/unarchive 同步推送失败: $e');
     });
   }

@@ -18,6 +18,7 @@ import '../insights/insights_provider.dart';
 import '../assets/assets_provider.dart';
 import '../../core/services/text_recognition/models/parsed_transaction.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'widgets/numpad.dart';
 
 /// 记一笔页（极简重构版）
 ///
@@ -824,7 +825,7 @@ class _RecordScreenState extends ConsumerState<RecordScreen> {
             const Spacer(),
 
             // ── 5. 数字键盘（常驻底部）──
-            _Numpad(
+            Numpad(
               onKeyTap: _onKeyTap,
               isSubmitting: _isSubmitting,
               isEditMode: _isEditMode || _isBatchMode,
@@ -1132,7 +1133,7 @@ class _InfoDivider extends StatelessWidget {
     return Container(
       width: 1,
       margin: const EdgeInsets.symmetric(vertical: 10),
-      color: Theme.of(context).colorScheme.outline.withAlpha(50),
+      color: Theme.of(context).colorScheme.outlineVariant,
     );
   }
 }
@@ -1730,6 +1731,8 @@ class _ChildCategoryChipState extends State<_ChildCategoryChip>
   @override
   void initState() {
     super.initState();
+    // 注意：不能在 initState 中用 context 调 MediaQuery.of()，
+    // 否则会在初始化阶段注册 InheritedWidget 依赖，引发 _dependents.isEmpty 断言失败
     _bounceCtrl = AnimationController(
         duration: const Duration(milliseconds: 320), vsync: this);
     _bounceAnim = TweenSequence<double>([
@@ -2034,160 +2037,6 @@ class _AccountPickerSheet extends StatelessWidget {
 // ═══════════════════════════════════════════════════════════════
 // 数字键盘（精致版）
 // ═══════════════════════════════════════════════════════════════
-
-class _Numpad extends StatelessWidget {
-  final void Function(String) onKeyTap;
-  final bool isSubmitting;
-  final bool isEditMode;
-
-  const _Numpad({
-    required this.onKeyTap,
-    required this.isSubmitting,
-    this.isEditMode = false,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          // 数字行 1-9
-          _NumRow(keys: const ['1', '2', '3'], onKeyTap: onKeyTap, theme: theme),
-          _NumRow(keys: const ['4', '5', '6'], onKeyTap: onKeyTap, theme: theme),
-          _NumRow(keys: const ['7', '8', '9'], onKeyTap: onKeyTap, theme: theme),
-          // 最后一行：. / 0 / 完成
-          Row(
-            children: [
-              _NumKey('.', onKeyTap, theme),
-              _NumKey('0', onKeyTap, theme),
-              Expanded(
-                child: SizedBox(
-                  height: 52,
-                  child: Padding(
-                    padding: const EdgeInsets.all(3),
-                    child: FilledButton(
-                      onPressed: isSubmitting ? null : () => onKeyTap('完成'),
-                      style: FilledButton.styleFrom(
-                        shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(12)),
-                      ),
-                      child: isSubmitting
-                          ? const SizedBox(
-                              width: 20,
-                              height: 20,
-                              child: CircularProgressIndicator(
-                                  strokeWidth: 2.5, color: Colors.white))
-                          : Text(
-                              isEditMode ? '保存' : '完成',
-                              style: const TextStyle(
-                                  fontSize: 17, fontWeight: FontWeight.w600),
-                            ),
-                    ),
-                  ),
-                ),
-              ),
-            ],
-          ),
-          // 清空 / 退格
-          Row(
-            children: [
-              Expanded(
-                child: SizedBox(
-                  height: 40,
-                  child: TextButton(
-                    onPressed: () => onKeyTap('清空'),
-                    style: TextButton.styleFrom(
-                      foregroundColor: theme.colorScheme.error.withAlpha(180),
-                      visualDensity: VisualDensity.compact,
-                    ),
-                    child: const Text('清空',
-                        style: TextStyle(
-                            fontSize: 15, fontWeight: FontWeight.w500)),
-                  ),
-                ),
-              ),
-              Expanded(
-                child: SizedBox(
-                  height: 40,
-                  child: TextButton(
-                    onPressed: () => onKeyTap('⌫'),
-                    style: TextButton.styleFrom(
-                        visualDensity: VisualDensity.compact),
-                    child: const Icon(Icons.backspace_outlined, size: 20),
-                  ),
-                ),
-              ),
-            ],
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _NumRow extends StatelessWidget {
-  final List<String> keys;
-  final void Function(String) onKeyTap;
-  final ThemeData theme;
-
-  const _NumRow(
-      {required this.keys, required this.onKeyTap, required this.theme});
-
-  @override
-  Widget build(BuildContext context) {
-    return Row(
-      children: keys.map((k) => _NumKey(k, onKeyTap, theme)).toList(),
-    );
-  }
-}
-
-/// 数字键盘单个按键（StatelessWidget + InkWell）
-///
-/// 原先用 GestureDetector + AnimatedContainer + _pressed 状态做按压反馈，
-/// 导致 onTapDown/onTapUp 的快速 setState 与父组件 rebuild 叠加，
-/// 造成背景/文字颜色不同步的"反复闪烁"。
-/// 改为 InkWell：按压状态由 Flutter 框架内部维护，无 setState 竞争。
-class _NumKey extends StatelessWidget {
-  final String label;
-  final void Function(String) onTap;
-  final ThemeData theme;
-
-  const _NumKey(this.label, this.onTap, this.theme);
-
-  @override
-  Widget build(BuildContext context) {
-    return Expanded(
-      child: SizedBox(
-        height: 52,
-        child: Padding(
-          padding: const EdgeInsets.all(3),
-          child: Material(
-            color: Colors.transparent,
-            borderRadius: BorderRadius.circular(12),
-            child: InkWell(
-              borderRadius: BorderRadius.circular(12),
-              onTap: () => onTap(label),
-              child: Center(
-                child: Text(
-                  label,
-                  style: TextStyle(
-                    fontSize: 22,
-                    fontWeight: FontWeight.w400,
-                    color: theme.colorScheme.onSurface,
-                    fontFeatures: const [FontFeature.tabularFigures()],
-                  ),
-                ),
-              ),
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}
 
 // ─────────────────────────────────────────────
 // 辅助函数

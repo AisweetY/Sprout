@@ -3,8 +3,7 @@
 ///
 /// 部署: supabase functions deploy ai-financial-summary
 ///
-/// 接收 App 端预聚合的财务数据，调用 AI 生成 200-500 字自然语言小结。
-/// 复用 ai_provider_configs 表决定调用哪个平台/模型。
+/// 返回格式：{ user_tag, tag_desc, opening, insights[], focus, advice }
 /// ============================================================
 
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
@@ -20,18 +19,23 @@ const corsHeaders: Record<string, string> = {
 interface ProviderConfig {
   id: string;
   provider_name: string;
-  display_name: string;
   base_url: string;
   model: string;
   api_key_secret_name: string;
-  adapter_type: string;
   is_active: boolean;
 }
 
+interface AdviceHints {
+  goal_status: string | null;       // 目标达成情况（Flutter 精算，如"当前完成72%，按节奏预计完成约85%，本月难达标"）
+  top_gain_category: string | null; // 本期环比增幅最大的分类
+  top_gain_amount: number | null;   // 该分类比上期多花了多少
+  days_remaining: number;           // 当前周期剩余天数（0=已结束）
+}
+
 interface SummaryRequest {
-  dimension_name: string;    // "本周" / "本月" / "2024年" / "6月1日-6月20日"
-  period_label: string;      // 同 dimension_name，用于显示
-  current_date: string;      // "2026-06-20"
+  dimension_name: string;
+  period_label: string;
+  current_date: string;
   income: number;
   expense: number;
   net_saving: number;
@@ -50,125 +54,122 @@ interface SummaryRequest {
     category: string;
   }>;
   high_frequency_category: string | null;
-  assets: {
-    cash_ratio: number;
-    invest_ratio: number;
-  } | null;
+  assets: { cash_ratio: number; invest_ratio: number } | null;
   historical_avg_expense: number | null;
   budget_status: string | null;
+  advice_hints: AdviceHints;
 }
 
 // ═══════════════════════════════════════════════════════════════
 // Prompt 构建
 // ═══════════════════════════════════════════════════════════════
 
-function buildPrompt(data: SummaryRequest): string {
-  // 分类 TOP3 文本
-  let catText = "";
-  if (data.top_categories.length > 0) {
-    catText = data.top_categories
+function buildPrompt(d: SummaryRequest): string {
+  // ── 分类 TOP3 ──
+  let catText = "无消费分类数据";
+  if (d.top_categories.length > 0) {
+    catText = d.top_categories
       .map((c, i) => {
-        const diff =
-          c.prev_amount > 0
-            ? ` (${data.dimension_name === "本日" || data.dimension_name === "本周" ? "对比" : "环比"}${c.amount >= c.prev_amount ? "+" : ""}${c.amount - c.prev_amount >= 0 ? "¥" : "-¥"}${Math.abs(c.amount - c.prev_amount).toFixed(0)})`
-            : "";
-        return `第${i + 1}：${c.name} ¥${c.amount.toFixed(0)}，占比 ${c.ratio.toFixed(0)}%${diff}`;
+        const prevDiff = c.prev_amount > 0
+          ? `，环比${c.amount >= c.prev_amount ? "+" : ""}¥${(c.amount - c.prev_amount).toFixed(0)}`
+          : "";
+        return `${i + 1}. ${c.name} ¥${c.amount.toFixed(0)}（占 ${c.ratio.toFixed(0)}%${prevDiff}）`;
       })
-      .join("；");
-  } else {
-    catText = "暂无消费分类数据";
+      .join("  ");
   }
 
-  // 大额消费
+  // ── 大额消费 ──
   let largeText = "无";
-  if (data.large_expenses.length > 0) {
-    largeText = data.large_expenses
-      .map((e) => `${e.description}（${e.category}，¥${e.amount.toFixed(0)}）`)
-      .join("；");
+  if (d.large_expenses.length > 0) {
+    largeText = d.large_expenses
+      .map((e) => `"${e.description}" ¥${e.amount.toFixed(0)}`)
+      .join("、");
   }
 
-  // 资产
-  let assetText = "暂无资产数据";
-  if (data.assets) {
-    assetText = `现金类资产占比 ${data.assets.cash_ratio}%，投资类资产占比 ${data.assets.invest_ratio}%`;
+  // ── 历史均值 ──
+  let histText = "无历史数据";
+  let histDiffText = "";
+  if (d.historical_avg_expense != null && d.historical_avg_expense > 0) {
+    const diff = d.expense - d.historical_avg_expense;
+    const pct = ((diff / d.historical_avg_expense) * 100).toFixed(0);
+    histText = `过去 6 个月月均支出 ¥${d.historical_avg_expense.toFixed(0)}`;
+    histDiffText = `本期${diff >= 0 ? "超出" : "低于"}均值 ¥${Math.abs(diff).toFixed(0)}（${diff >= 0 ? "+" : ""}${pct}%）`;
   }
 
-  // 历史均值
-  let histText = "暂无历史数据";
-  if (data.historical_avg_expense != null && data.historical_avg_expense > 0) {
-    const diff = data.expense - data.historical_avg_expense;
-    const label = diff >= 0 ? "超出" : "低于";
-    histText = `历史月均支出 ¥${data.historical_avg_expense.toFixed(0)}，当期${label} ¥${Math.abs(diff).toFixed(0)}`;
-  }
+  // ── 支出环比 ──
+  const expDiff = d.prev_expense > 0
+    ? `比上期${d.expense >= d.prev_expense ? "多" : "少"} ¥${Math.abs(d.expense - d.prev_expense).toFixed(0)}`
+    : "无上期数据";
 
-  // 预算
-  let budgetText = data.budget_status ?? "暂无预算数据";
+  // ── 资产 ──
+  const assetText = d.assets
+    ? `现金类 ${d.assets.cash_ratio}%，投资类 ${d.assets.invest_ratio}%`
+    : "无资产数据";
 
-  return `你是一名专业财富顾问，请根据用户在【${data.dimension_name}（${data.period_label}）】内的财务状况，生成一份简洁专业的财务小结。
+  // ── 建议锚点（App 精确计算，AI 写 advice 只能引用这里的结论，不得编造）──
+  const h: AdviceHints = d.advice_hints ?? {
+    goal_status: null,
+    top_gain_category: null,
+    top_gain_amount: null,
+    days_remaining: 0,
+  };
+  const anchorLines: string[] = [];
 
-## 用户财务数据（已为您聚合计算好，无需再查原始明细）
+  anchorLines.push(h.goal_status
+    ? `目标达成情况：${h.goal_status}`
+    : "储蓄目标：无（用户未设置）"
+  );
 
-- 当前日期：${data.current_date}
-- 时间维度：${data.dimension_name}
-- 总收入：¥${data.income.toFixed(0)}
-- 总支出：¥${data.expense.toFixed(0)}
-- 结余：¥${data.net_saving.toFixed(0)}${data.net_saving < 0 ? "（入不敷出）" : ""}
-- 储蓄率：${data.savings_rate.toFixed(0)}%
-- 上期收入：¥${data.prev_income.toFixed(0)}
-- 上期支出：¥${data.prev_expense.toFixed(0)}
-- 支出环比变化：${data.prev_expense > 0 ? ((data.expense - data.prev_expense) >= 0 ? "+¥" : "-¥") + Math.abs(data.expense - data.prev_expense).toFixed(0) : "无上期数据"}
-- 收入环比变化：${data.prev_income > 0 ? ((data.income - data.prev_income) >= 0 ? "+¥" : "-¥") + Math.abs(data.income - data.prev_income).toFixed(0) : "无上期数据"}
+  anchorLines.push(h.top_gain_category && h.top_gain_amount != null
+    ? `最大增支：「${h.top_gain_category}」比上期多花了 ¥${h.top_gain_amount.toFixed(0)}`
+    : "最大增支：各分类未明显超出上期"
+  );
 
-### 消费结构
-${catText}
+  anchorLines.push(h.days_remaining > 0
+    ? `周期剩余：还有 ${h.days_remaining} 天`
+    : "周期状态：已结束"
+  );
 
-### 大额 / 异常消费
-${largeText}
+  const anchorText = anchorLines.join("\n");
 
-### 高频消费分类
-${data.high_frequency_category ?? "无明显高频消费"}
+  return `你是用户的私人财务参谋。根据下方数据写财务小结，只输出 JSON，不加任何其他文字。
 
-### 历史对照
-${histText}
+数据（${d.dimension_name}·${d.period_label}·${d.current_date}）：
+收入¥${d.income.toFixed(0)} 支出¥${d.expense.toFixed(0)} 结余¥${d.net_saving.toFixed(0)}${d.net_saving < 0 ? "[入不敷出]" : ""} 储蓄率${d.savings_rate.toFixed(0)}%
+上期支出¥${d.prev_expense.toFixed(0)}（${expDiff}）| ${histText}${histDiffText ? " " + histDiffText : ""}
+支出TOP3：${catText}
+大额（≥500）：${largeText} | 高频：${d.high_frequency_category ?? "无"} | 资产：${assetText}
+预算：${d.budget_status ?? "无"}
 
-### 资产配置
-${assetText}
+建议锚点（以下数字由App精算，advice只能用这些数字）：
+${anchorText}
 
-### 预算达成
-${budgetText}
+输出以下JSON结构（字段含义见括号，不要输出括号里的内容）：
+{"user_tag":"消费人格4~8字","tag_desc":"诠释≤18字不重复标签","opening":"整体状态定调≤25字","insights":[{"conclusion":"判断≤12字","detail":"数字+对比≤35字"}],"focus":{"problem":"最大问题≤18字","vs_history":"量化对比≤20字"},"advice":"两句话共≤45字"}
 
-## 分析维度（作为你内部判断的思考框架，不需要逐项在输出中体现）
+写作规则：
+1. user_tag 必须以「型」结尾，4~8字，描述消费个性，可以幽默接地气（如：月末惊魂型、手滑不自知型、默默存钱型、刚刚好型、餐饮刺客受害型），禁止营销腔
+2. insights 2~3条，conclusion是判断句不是数据描述，detail必须含具体数字和上期/历史对比
+3. advice 写法（两句话，共≤45字）：
+   第一句：直接复述「目标达成情况」锚点里的结论，原话或近义改写，不加修饰
+   第二句：给下期一条调整，围绕「最大增支」分类；若无增支则给一条通用下期建议
+   禁止：给本期内"今天/这周"的具体行动；编造锚点外的金额数字
+4. 禁用词：建议关注/值得注意/合理配置/保持健康/消费习惯/整体良好
+5. focus无明显问题时设null
+6. 只输出JSON，不加解释、不加代码块`;
+}
 
-1. 资产变化总览：总资产变化金额、增长或下降原因
-2. 收支情况：总收入、总支出、结余、储蓄率、收支健康度
-3. 消费结构分析：TOP3消费类别、占比、结构特点
-4. 异常消费识别：大额消费、高频消费、新增消费类型、超出历史均值消费
-5. 趋势变化分析：与上一周期相比明显变化的消费类别、收支变化趋势
-6. 收入来源分析：收入构成、收入稳定性
-7. 现金流风险分析：当前余额安全性、是否存在资金压力
-8. 资产配置分析（若有资产数据）：现金类/投资类占比、配置合理性
-9. 用户财务习惯洞察：消费风格和财务特征总结
-10. 财务建议：1~3条最有价值的建议
+// ═══════════════════════════════════════════════════════════════
+// 工具函数
+// ═══════════════════════════════════════════════════════════════
 
-## 时间维度适用性参考
-
-- 日/周（短周期）：重点关注收支情况、消费结构、异常消费、近期趋势对比
-- 月：在上述基础上增加趋势变化分析、收入来源分析
-- 年/自定义（长周期）：可进一步纳入资产配置分析、现金流风险分析、用户财务习惯洞察、财务建议
-
-## 输出要求
-
-- 不要罗列原始数据，重点输出有价值的洞察和结论
-- 语言专业、简洁、有温度
-- 字数控制在200~500字
-- 优先分析变化、异常和趋势
-- 避免空泛建议
-- 某分析项数据不足时直接跳过，不要在正文中提及"该项暂无数据"
-- 输出内容融合成连贯的自然段落，不使用标题、编号或列表
-- 不添加任何开场白或结束语，直接输出小结正文本身
-- 最终输出应像私人财富顾问写给用户的一段简短总结
-
-请直接输出小结正文，不要输出 JSON 或其他包装格式。`;
+function extractJson(text: string): string {
+  const mdMatch = text.match(/```(?:json)?\s*([\s\S]*?)```/);
+  if (mdMatch) return mdMatch[1].trim();
+  const start = text.indexOf("{");
+  const end = text.lastIndexOf("}");
+  if (start !== -1 && end !== -1) return text.slice(start, end + 1).trim();
+  return text.trim();
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -179,7 +180,6 @@ serve(async (req: Request): Promise<Response> => {
   if (req.method === "OPTIONS") {
     return new Response("ok", { headers: corsHeaders });
   }
-
   if (req.method !== "POST") {
     return new Response(
       JSON.stringify({ error: "仅支持 POST 请求" }),
@@ -190,13 +190,10 @@ serve(async (req: Request): Promise<Response> => {
   try {
     // ── 1. 身份校验 ──
     const authHeader = req.headers.get("Authorization");
-    if (!authHeader) {
-      return jsonResponse({ error: "未登录" }, 401);
-    }
+    if (!authHeader) return jsonResponse({ error: "未登录" }, 401);
 
     const supabaseUrl = Deno.env.get("SUPABASE_URL") ?? "";
     const supabaseAnonKey = Deno.env.get("SUPABASE_ANON_KEY") ?? "";
-
     if (!supabaseUrl || !supabaseAnonKey) {
       return jsonResponse({ error: "服务端配置缺失" }, 500);
     }
@@ -207,11 +204,9 @@ serve(async (req: Request): Promise<Response> => {
     });
 
     const { data: { user }, error: authError } = await supabase.auth.getUser();
-    if (authError || !user) {
-      return jsonResponse({ error: "身份校验失败" }, 401);
-    }
+    if (authError || !user) return jsonResponse({ error: "身份校验失败" }, 401);
 
-    // ── 2. 会员校验（服务端强校验，防止客户端门禁被绕过）──
+    // ── 2. 会员校验 ──
     const { data: membership } = await supabase
       .from("memberships")
       .select("status, expires_at")
@@ -220,12 +215,9 @@ serve(async (req: Request): Promise<Response> => {
 
     const membershipActive =
       membership?.status === "active" &&
-      (membership.expires_at === null ||
-        new Date(membership.expires_at) > new Date());
+      (membership.expires_at === null || new Date(membership.expires_at) > new Date());
 
-    if (!membershipActive) {
-      return jsonResponse({ error: "MEMBERSHIP_REQUIRED" }, 402);
-    }
+    if (!membershipActive) return jsonResponse({ error: "MEMBERSHIP_REQUIRED" }, 402);
 
     // ── 3. 解析请求 ──
     const body: SummaryRequest = await req.json().catch(() => null);
@@ -233,7 +225,7 @@ serve(async (req: Request): Promise<Response> => {
       return jsonResponse({ error: "缺少必填参数" }, 400);
     }
 
-    // ── 4. 读配置表 ──
+    // ── 4. 读 AI 配置 ──
     const { data: config, error: configError } = await supabase
       .from("ai_provider_configs")
       .select("*")
@@ -245,20 +237,15 @@ serve(async (req: Request): Promise<Response> => {
     }
 
     const provider = config as ProviderConfig;
-
-    // ── 5. 取 API Key ──
     const apiKey = Deno.env.get(provider.api_key_secret_name);
     if (!apiKey) {
-      return jsonResponse(
-        { error: `未配置 ${provider.api_key_secret_name}` },
-        500
-      );
+      return jsonResponse({ error: `未配置 ${provider.api_key_secret_name}` }, 500);
     }
 
-    // ── 6. 组装 prompt & 调 AI ──
+    // ── 5. 调 AI ──
     const prompt = buildPrompt(body);
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 25_000);
+    const timeout = setTimeout(() => controller.abort(), 28_000);
 
     let aiResponse: Response;
     try {
@@ -270,11 +257,9 @@ serve(async (req: Request): Promise<Response> => {
         },
         body: JSON.stringify({
           model: provider.model,
-          messages: [
-            { role: "user", content: prompt },
-          ],
-          temperature: 0.7,
-          max_tokens: 1024,
+          messages: [{ role: "user", content: prompt }],
+          temperature: 0.5,
+          max_tokens: 900,
         }),
         signal: controller.signal,
       });
@@ -301,14 +286,62 @@ serve(async (req: Request): Promise<Response> => {
     }
 
     const result = await aiResponse.json();
-    const content: string | undefined = result.choices?.[0]?.message?.content;
+    const content: string | null | undefined = result.choices?.[0]?.message?.content;
+    const finishReason: string | undefined = result.choices?.[0]?.finish_reason;
+
+    // 记录关键调试信息，方便在 Supabase Dashboard → Logs 里排查
+    console.log(`[ai-financial-summary] finish_reason=${finishReason}, content_len=${content?.length ?? 0}`);
 
     if (!content || content.trim().length === 0) {
-      return jsonResponse({ error: "AI 服务返回了空内容" }, 502);
+      const reason = finishReason === "content_filter"
+        ? "AI 内容过滤拦截，请稍后重试"
+        : finishReason === "length"
+          ? "AI 输出被截断（token 不足），请稍后重试"
+          : "AI 服务返回了空内容";
+      console.error(`[ai-financial-summary] empty content: finish_reason=${finishReason}, raw_result=${JSON.stringify(result).slice(0, 300)}`);
+      return jsonResponse({ error: reason }, 502);
     }
 
-    // ── 7. 返回小结 ──
-    return jsonResponse({ summary: content.trim() });
+    // ── 6. 解析结构化 JSON ──
+    let parsed: Record<string, unknown>;
+    try {
+      parsed = JSON.parse(extractJson(content));
+    } catch (e) {
+      console.error("⚠️ JSON 解析失败:", e, "\n原始内容:", content);
+      return jsonResponse({ error: "AI 返回格式异常，请重试" }, 502);
+    }
+
+    // 校验必填字段
+    const userTag = String(parsed.user_tag ?? "").trim();
+    const tagDesc = String(parsed.tag_desc ?? "").trim();
+    const opening = String(parsed.opening ?? "").trim();
+    const rawInsights = parsed.insights;
+    const insights = Array.isArray(rawInsights)
+      ? rawInsights
+          .map((i) => ({
+            conclusion: String((i as Record<string, unknown>).conclusion ?? "").trim(),
+            detail: String((i as Record<string, unknown>).detail ?? "").trim(),
+          }))
+          .filter((i) => i.conclusion && i.detail)
+      : [];
+    const advice = String(parsed.advice ?? "").trim();
+
+    if (!userTag || !opening || insights.length === 0 || !advice) {
+      console.error("⚠️ 结构不完整:", { userTag, opening, insights, advice });
+      return jsonResponse({ error: "AI 返回了不完整的内容，请重试" }, 502);
+    }
+
+    // focus 可选（本期无明显问题时 AI 会返回 null）
+    const rawFocus = parsed.focus as Record<string, unknown> | null | undefined;
+    const focus = rawFocus && rawFocus.problem
+      ? {
+          problem: String(rawFocus.problem ?? "").trim(),
+          vs_history: String(rawFocus.vs_history ?? "").trim(),
+        }
+      : null;
+
+    return jsonResponse({ user_tag: userTag, tag_desc: tagDesc, opening, insights, focus, advice });
+
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     return jsonResponse({ error: `服务内部错误: ${message}` }, 500);

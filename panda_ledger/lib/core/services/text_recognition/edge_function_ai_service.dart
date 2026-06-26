@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
+import '../../utils/error_logger.dart';
 import 'ai_service_interface.dart';
 import 'models/parsed_transaction.dart';
 
@@ -45,7 +46,8 @@ class EdgeFunctionAiService implements IAiParsingService {
     if (expiresAt.isBefore(DateTime.now().add(const Duration(seconds: 60)))) {
       try {
         await Supabase.instance.client.auth.refreshSession();
-      } catch (_) {
+      } catch (e, s) {
+        ErrorLogger.log('JWT刷新失败', e, s);
         // 刷新失败不阻断——让后续调用正常失败并抛出，由上层处理
       }
     }
@@ -66,7 +68,8 @@ class EdgeFunctionAiService implements IAiParsingService {
             body: {'mode': 'ping', 'input_text': '', 'today': ''},
           )
           .timeout(const Duration(seconds: 20));
-    } catch (_) {
+    } catch (e, s) {
+      ErrorLogger.log('Edge Function预热失败', e, s);
       // 预热失败不影响任何功能，静默忽略
     }
   }
@@ -121,8 +124,9 @@ class EdgeFunctionAiService implements IAiParsingService {
       }
 
       return _parseSingleResult(data, userInput);
-    } catch (e) {
+    } catch (e, s) {
       _rethrowIfAuthOrMembership(e);
+      ErrorLogger.log('Edge Function调用失败', e, s);
       debugPrint('⚠️ Edge Function 调用失败: $e');
       return ParsedTransaction.empty(userInput);
     }
@@ -166,8 +170,9 @@ class EdgeFunctionAiService implements IAiParsingService {
           .map((e) => _parseSingleResult(e as Map<String, dynamic>?, ''))
           .where((p) => p.hasPartialResult)
           .toList();
-    } catch (e) {
+    } catch (e, s) {
       _rethrowIfAuthOrMembership(e);
+      ErrorLogger.log('Edge Function批量调用失败', e, s);
       debugPrint('⚠️ Edge Function 批量调用失败: $e');
       return [];
     }

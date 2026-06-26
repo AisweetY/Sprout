@@ -18,15 +18,6 @@ class RecordDao extends DatabaseAccessor<AppDatabase> with _$RecordDaoMixin {
         .get();
   }
 
-  /// 按账户获取流水
-  Future<List<Record>> getRecordsByAccount(String accountId, {int limit = 50}) {
-    return (select(db.records)
-          ..where((t) => t.accountId.equals(accountId) & t.deleted.equals(false))
-          ..orderBy([(t) => OrderingTerm.desc(t.occurredAt)])
-          ..limit(limit))
-        .get();
-  }
-
   /// 获取指定日期范围的收支汇总
   Future<Map<String, double>> getSummary(DateTime start, DateTime end) {
     final query = db.customSelect(
@@ -70,24 +61,6 @@ class RecordDao extends DatabaseAccessor<AppDatabase> with _$RecordDaoMixin {
     return getRecordsInRange(start, end);
   }
 
-  /// 获取某月某分类的支出合计
-  Future<double> getCategoryMonthlyTotal(String categoryId, int year, int month) {
-    final start = DateTime(year, month, 1);
-    final end = DateTime(year, month + 1, 1);
-
-    final query = db.customSelect(
-      'SELECT COALESCE(SUM(amount), 0) as total FROM records WHERE category_id = ? AND type = ? AND occurred_at >= ? AND occurred_at < ? AND deleted = 0',
-      variables: [
-        Variable.withString(categoryId),
-        Variable.withString('expense'),
-        Variable.withDateTime(start),
-        Variable.withDateTime(end),
-      ],
-      readsFrom: {db.records},
-    );
-    return query.map((row) => row.read<double>('total')).getSingle();
-  }
-
   /// 获取当月收支汇总（委托给 getSummary）
   Future<Map<String, double>> getMonthlySummary(int year, int month) {
     final start = DateTime(year, month, 1);
@@ -98,18 +71,6 @@ class RecordDao extends DatabaseAccessor<AppDatabase> with _$RecordDaoMixin {
   /// 插入流水
   Future<void> insertRecord(Insertable<Record> record) {
     return into(db.records).insert(record);
-  }
-
-  /// 更新同步状态
-  Future<void> updateSyncStatus(String id, String status) {
-    return (update(db.records)..where((t) => t.id.equals(id))).write(
-      RecordsCompanion(syncStatus: Value(status)),
-    );
-  }
-
-  /// 获取待同步记录
-  Future<List<Record>> getPendingSyncRecords() {
-    return (select(db.records)..where((t) => t.syncStatus.equals('pending'))).get();
   }
 
   /// 监听月度流水（Riverpod watch）
@@ -153,11 +114,6 @@ class RecordDao extends DatabaseAccessor<AppDatabase> with _$RecordDaoMixin {
         syncStatus: const Value('pending'),
       ),
     );
-  }
-
-  /// 按 ID 获取单条记录（含已删除，供同步使用）
-  Future<Record?> getByIdAny(String id) {
-    return (select(db.records)..where((t) => t.id.equals(id))).getSingleOrNull();
   }
 
   /// 搜索 + 筛选流水（分页）

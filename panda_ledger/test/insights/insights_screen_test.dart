@@ -1,4 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:panda_ledger/core/models/time_dimension.dart';
 import 'package:panda_ledger/features/insights/insights_provider.dart';
 
 /// InsightsData 模型测试——验证模型正确存储和传递所有时间维度参数

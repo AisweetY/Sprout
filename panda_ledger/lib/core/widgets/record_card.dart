@@ -106,13 +106,13 @@ class _RecordCardState extends State<RecordCard> {
       duration: const Duration(milliseconds: 70),
       curve: Curves.easeOut,
       child: Card(
-        margin: const EdgeInsets.symmetric(vertical: 3),
+        margin: const EdgeInsets.symmetric(vertical: 4),
         child: InkWell(
           onTap: widget.onTap,
           onHighlightChanged: (h) => setState(() => _pressed = h),
           borderRadius: BorderRadius.circular(12),
           child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 11),
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
@@ -228,8 +228,7 @@ class _RecordCardState extends State<RecordCard> {
                             padding: const EdgeInsets.symmetric(
                                 horizontal: 5, vertical: 1),
                             decoration: BoxDecoration(
-                              color: theme.colorScheme.secondaryContainer
-                                  .withAlpha(140),
+                              color: theme.colorScheme.secondaryContainer,
                               borderRadius: BorderRadius.circular(4),
                             ),
                             child: Text(
@@ -284,7 +283,7 @@ class _RecordCardState extends State<RecordCard> {
         background: Container(
           alignment: Alignment.centerRight,
           padding: const EdgeInsets.only(right: 20),
-          margin: const EdgeInsets.symmetric(vertical: 3),
+          margin: const EdgeInsets.symmetric(vertical: 4),
           decoration: BoxDecoration(
             color: _dismissThresholdReached
                 ? Theme.of(context).colorScheme.primary

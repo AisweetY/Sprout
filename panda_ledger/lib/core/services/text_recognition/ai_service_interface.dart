@@ -5,7 +5,6 @@ import 'models/parsed_transaction.dart';
 /// 实现类：
 /// - [EdgeFunctionAiService] — 通过 Supabase Edge Function 调用 AI 解析
 /// - [AiServiceStub] — 未登录时的桩实现，返回空结果
-/// - [RuleEngine] — 已废弃的本地规则引擎（保留仅作参考）
 abstract class IAiParsingService {
   /// 解析用户输入的自然语言（单笔）
   ///

@@ -686,7 +686,7 @@ class _RedeemSheetState extends State<_RedeemSheet> {
 
       messenger.showSnackBar(
         const SnackBar(
-          content: Text('🎉 兑换成功，已开通会员！'),
+          content: Text('兑换成功，已开通会员！'),
           behavior: SnackBarBehavior.floating,
         ),
       );

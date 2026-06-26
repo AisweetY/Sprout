@@ -10,6 +10,7 @@ import '../../core/services/text_recognition/models/parsed_transaction.dart';
 import '../../core/services/text_recognition/text_recognition_provider.dart';
 import '../membership/membership_provider.dart';
 import '../../core/utils/id_generator.dart';
+import '../../core/utils/snackbar_utils.dart';
 import '../../core/widgets/record_card.dart';
 import '../../data/local/app_database_provider.dart';
 import '../../data/repository/account_repository.dart';
@@ -293,11 +294,9 @@ class _BatchRecordScreenState extends ConsumerState<BatchRecordScreen> {
       _clearDraft(); // 保存成功，清除草稿
 
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('成功保存 $savedCount/${validCards.length} 笔记录'),
-            behavior: SnackBarBehavior.floating,
-          ),
+        SnackbarUtils.show(
+          context: context,
+          message: '成功保存 $savedCount/${validCards.length} 笔记录',
         );
         Navigator.of(context).pop(); // 返回上一页
       }

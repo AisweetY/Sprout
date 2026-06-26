@@ -34,17 +34,4 @@ class SyncQueueDao extends DatabaseAccessor<AppDatabase> with _$SyncQueueDaoMixi
   Future<void> dequeue(int id) {
     return (delete(db.syncQueue)..where((t) => t.id.equals(id))).go();
   }
-
-  /// 清空已完成项
-  Future<void> clearCompleted() {
-    return (delete(db.syncQueue)..where((t) => t.retryCount.isBiggerOrEqualValue(5))).go();
-  }
-
-  /// 获取队列数量
-  Future<int> getQueueCount() {
-    return customSelect(
-      'SELECT COUNT(*) AS cnt FROM sync_queue',
-      readsFrom: {db.syncQueue},
-    ).map((row) => row.read<int>('cnt')).getSingle();
-  }
 }

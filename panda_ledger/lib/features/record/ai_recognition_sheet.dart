@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/services/text_recognition/edge_function_ai_service.dart';
 import '../../core/services/text_recognition/models/parsed_transaction.dart';
 import '../../core/services/text_recognition/text_recognition_provider.dart';
+import '../../core/utils/error_logger.dart';
 import '../../data/local/app_database_provider.dart';
 import '../../data/repository/account_repository.dart';
 
@@ -112,7 +113,8 @@ class _AiRecognitionSheetState extends ConsumerState<AiRecognitionSheet> {
         _isParsing = false;
         _parseError = '登录状态已过期，请重新登录后再试';
       });
-    } catch (e) {
+    } catch (e, s) {
+      ErrorLogger.log('AI识别出错', e, s);
       if (!mounted) return;
       setState(() {
         _isParsing = false;

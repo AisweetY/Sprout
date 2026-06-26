@@ -428,13 +428,12 @@ class SyncQueueService {
       // ═══ 3. 拉取 records ═══
       if (lastPullAt != null) {
         // 增量拉取：仅拉取 updated_at >= lastPullAt 的变更
-        var recQuery = supabase
+        final remoteRecords = await supabase
             .from('records')
             .select()
             .eq('user_id', userId)
+            .gte('updated_at', lastPullAt.toIso8601String())
             .order('updated_at', ascending: false);
-        recQuery = _addIncrementalFilter(recQuery, 'updated_at', lastPullAt);
-        final remoteRecords = await recQuery;
         for (final r in remoteRecords) {
           await _upsertRecordFromRemote(r);
         }
@@ -662,15 +661,6 @@ class SyncQueueService {
       queryBuilder = queryBuilder.gte(column, lastPullAt.toIso8601String());
     }
     return await queryBuilder;
-  }
-
-  /// 向已有查询追加增量过滤条件
-  dynamic _addIncrementalFilter(
-    dynamic queryBuilder,
-    String column,
-    DateTime lastPullAt,
-  ) {
-    return queryBuilder.gte(column, lastPullAt.toIso8601String());
   }
 
   // ═══════════════════════════════════════════════════════════════

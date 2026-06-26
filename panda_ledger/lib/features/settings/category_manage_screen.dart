@@ -118,7 +118,7 @@ class _CategoryManageScreenState extends ConsumerState<CategoryManageScreen>
           ),
         ],
       ),
-      floatingActionButton: FloatingActionButton.small(
+      floatingActionButton: FloatingActionButton(
         onPressed: () => _showAddDialog(),
         tooltip: '添加分类',
         child: const Icon(Icons.add),
@@ -289,7 +289,12 @@ class _CategoryManageScreenState extends ConsumerState<CategoryManageScreen>
                 FilledButton(
                   onPressed: () async {
                     final name = nameCtrl.text.trim();
-                    if (name.isEmpty) return;
+                    if (name.isEmpty) {
+                      if (ctx.mounted) {
+                        SnackbarUtils.showError(context: ctx, message: '请输入分类名称');
+                      }
+                      return;
+                    }
                     final dao = ref.read(categoryDaoProvider);
 
                     // 层级约束
@@ -413,7 +418,12 @@ class _CategoryManageScreenState extends ConsumerState<CategoryManageScreen>
                 FilledButton(
                   onPressed: () async {
                     final name = nameCtrl.text.trim();
-                    if (name.isEmpty) return;
+                    if (name.isEmpty) {
+                      if (ctx.mounted) {
+                        SnackbarUtils.showError(context: ctx, message: '请输入分类名称');
+                      }
+                      return;
+                    }
                     final dao = ref.read(categoryDaoProvider);
 
                     // 重名校验：排除自身，按更新后的层级位置检查

@@ -5,6 +5,7 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import '../../data/local/app_database_provider.dart';
 import '../../data/local/seed_service.dart';
 import '../../data/sync/sync_queue_dao_provider.dart';
+import '../../data/sync/sync_state_provider.dart';
 import '../auth/auth_provider.dart';
 import '../auth/auth_screen.dart';
 import '../auth/local_mode_provider.dart';
@@ -16,6 +17,7 @@ import 'budget_settings_screen.dart';
 import 'category_manage_screen.dart';
 import 'export_service.dart';
 import '../../core/services/version_service.dart';
+import '../../core/utils/snackbar_utils.dart';
 
 import '../../core/theme/theme_mode_provider.dart';
 import '../membership/membership_center_screen.dart';
@@ -140,9 +142,7 @@ class SettingsScreen extends ConsumerWidget {
                 await exportService.exportCsv();
               } catch (e) {
                 if (context.mounted) {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(content: Text('导出 CSV 失败: $e')),
-                  );
+                  SnackbarUtils.showError(context: context, message: '导出 CSV 失败: $e');
                 }
               }
             },
@@ -156,9 +156,7 @@ class SettingsScreen extends ConsumerWidget {
                 await exportService.exportJson();
               } catch (e) {
                 if (context.mounted) {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(content: Text('导出 JSON 失败: $e')),
-                  );
+                  SnackbarUtils.showError(context: context, message: '导出 JSON 失败: $e');
                 }
               }
             },
@@ -211,11 +209,9 @@ class SettingsScreen extends ConsumerWidget {
             onChanged: (v) async {
               final ok = await ref.read(reminderProvider.notifier).setEnabled(v);
               if (!ok && context.mounted) {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(
-                    content: Text('通知权限被拒绝，请在系统设置中开启'),
-                    behavior: SnackBarBehavior.floating,
-                  ),
+                SnackbarUtils.showError(
+                  context: context,
+                  message: '通知权限被拒绝，请在系统设置中开启',
                 );
               }
             },
@@ -310,8 +306,11 @@ class SettingsScreen extends ConsumerWidget {
 
 /// 本地模式下登录以开启云同步
 ///
-/// 流程：push AuthScreen 登录 → 关闭本地模式 → flush 本地堆积的 sync_queue
-/// → 拉取云端数据合并。本地期间所有写入已入队，登录后自动推送至新账户。
+/// 流程：push AuthScreen 登录 → 关闭本地模式 → 双向同步（push 本地→云端 + pull 云端→本地）
+/// → 等首页数据刷新 → 通知用户同步完成。
+///
+/// 进度指示复用 syncStateProvider，与 AppShell._initialize() 保持一致：
+/// HomeScreen AppBar 持续显示进度条，双向同步全部完成后弹 SnackBar "数据同步完成"。
 Future<void> _loginForSync(BuildContext context, WidgetRef ref) async {
   await Navigator.of(context).push(
     MaterialPageRoute(builder: (_) => const AuthScreen()),
@@ -325,31 +324,42 @@ Future<void> _loginForSync(BuildContext context, WidgetRef ref) async {
   // 会员状态立即刷新（不阻塞）
   ref.read(membershipProvider.notifier).refresh().catchError((_) {});
 
+  // 启动持久进度条（HomeScreen AppBar 持续展示，直到双向同步完成）
+  ref.read(syncStateProvider.notifier).start();
+
   // 立即告知用户已登录，不等同步完成
   if (context.mounted) {
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(
         content: Text('已登录，数据同步中…'),
         behavior: SnackBarBehavior.floating,
-        duration: Duration(seconds: 2),
       ),
     );
   }
 
-  // 同步放后台：不阻塞 UI，完成后刷新各页面数据
-  // 因为三个页面均已加 skipLoadingOnReload，刷新时保留旧数据不闪屏
-  final sync = ref.read(syncQueueServiceProvider);
-  sync.processQueue()
-      .then((_) => sync.pullFromSupabase())
-      .then((_) => sync.processQueue())
-      .then((_) {
-        ref.invalidate(homeDataProvider);
-        ref.invalidate(assetsDataProvider);
-        ref.invalidate(insightsDataProvider);
-      })
-      .catchError((_) {
-        // 同步失败不阻塞，后台定时同步会继续重试
-      });
+  // 双向同步：push 本地→云端 → pull 云端→本地 → push 对账后重新入队的记录
+  try {
+    final sync = ref.read(syncQueueServiceProvider);
+    await sync.processQueue();       // 1. 推送本地数据到云端
+    await sync.pullFromSupabase();   // 2. 拉取云端数据合并到本地
+    await sync.processQueue();       // 3. 推送对账/拉取后可能重新入队的记录
+
+    // 刷新各页面数据（skipLoadingOnReload 保留旧数据，不闪屏）
+    ref.invalidate(homeDataProvider);
+    ref.invalidate(assetsDataProvider);
+    ref.invalidate(insightsDataProvider);
+
+    // 通知同步完成：延迟到下一帧，避免在 build 阶段修改状态导致框架断言失败
+    // HomeScreen 的 listener 会等 homeDataProvider 就绪后再弹 SnackBar + 收进度条
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      ref.read(syncStateProvider.notifier).done('数据同步完成');
+    });
+  } catch (e) {
+    debugPrint('同步失败: $e');
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      ref.read(syncStateProvider.notifier).reset();
+    });
+  }
 }
 
 /// 弹出清空数据二次确认对话框（要求勾选"我已导出备份"）
@@ -413,22 +423,11 @@ Future<void> _showClearDataDialog(BuildContext context, WidgetRef ref) async {
     ref.invalidate(insightsDataProvider);
 
     if (context.mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('所有数据已清空'),
-          behavior: SnackBarBehavior.floating,
-          duration: Duration(seconds: 2),
-        ),
-      );
+      SnackbarUtils.show(context: context, message: '所有数据已清空');
     }
   } catch (e) {
     if (context.mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('清空数据失败: $e'),
-          behavior: SnackBarBehavior.floating,
-        ),
-      );
+      SnackbarUtils.showError(context: context, message: '清空数据失败: $e');
     }
   }
 }
