@@ -1,12 +1,15 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:drift/drift.dart' hide Column;
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import 'core/services/text_recognition/edge_function_ai_service.dart';
+import 'core/utils/error_logger.dart';
 import 'data/account_dedup_service.dart';
 import 'data/category_dedup_service.dart';
 import 'data/local/app_database_provider.dart';
 import 'data/local/dao/sync_metadata_dao.dart';
+import 'data/local/database.dart';
 import 'data/local/seed_service.dart';
 import 'data/sync/sync_queue_dao_provider.dart';
 import 'data/sync/sync_state_provider.dart';
@@ -82,7 +85,9 @@ class _AppShellState extends ConsumerState<AppShell>
       await ref.read(categoryDedupServiceProvider).deduplicateOnce().catchError((_) => 0);
       await ref.read(accountDedupServiceProvider).deduplicateOnce().catchError((_) => 0);
       await syncService.processQueue();
-    } catch (_) {}
+    } catch (e, s) {
+      ErrorLogger.log('后台恢复同步失败', e, s);
+    }
     // 会员状态刷新放在同步之后（获取最新过期时间）
     ref.read(membershipProvider.notifier).refresh().catchError((_) {});
 
@@ -122,6 +127,13 @@ class _AppShellState extends ConsumerState<AppShell>
     var wasNewUser = false;
 
     try {
+      // ═══ 0. 快照本地分类/账户 ID（登录前已存在的本地数据） ═══
+      // 用于后续「云端为主」清理：快照内的 ID → 本地残留，无流水则回收；
+      // 快照外的 ID → 云端拉取的新数据，保留不动。
+      final db = ref.read(appDatabaseProvider);
+      final localCategoryIds = await _snapshotActiveCategoryIds(db);
+      final localAccountIds = await _snapshotActiveAccountIds(db);
+
       // 1. 先从 Supabase 拉取远端数据（新设备恢复 / 增量同步）
       try {
         await syncService.pullFromSupabase();
@@ -164,6 +176,19 @@ class _AppShellState extends ConsumerState<AppShell>
       }
       if (!mounted) return;
 
+      // 2.6 清理无用本地数据（仅非新用户）
+      // 登录后以云端数据为主：快照内的本地残留若无流水引用则软删除。
+      // 新用户（wasNewUser）跳过：种子数据是唯一数据，不可回收。
+      if (!wasNewUser) {
+        final currentUserId = ref.read(currentUserIdProvider);
+        await _cleanupUnusedLocalData(
+          db,
+          localCategoryIds,
+          localAccountIds,
+          currentUserId,
+        );
+      }
+
       // 3. 推送本地离线期间积累的变更
       await syncService.processQueue().catchError((e) {
         debugPrint('启动同步推送失败: $e');
@@ -191,7 +216,6 @@ class _AppShellState extends ConsumerState<AppShell>
 
       // 同步完成：通知 UI（仅刚登录 + 非新用户）
       // 新用户（wasNewUser）已在 seed 阶段提前 reset，无需再次通知
-      // 进度条会持续到 homeDataProvider 数据刷新完成后才收起（见 home_screen）
       if (isFirstSync && !wasNewUser && mounted) {
         ref.read(syncStateProvider.notifier).done('数据同步完成');
       }
@@ -200,11 +224,153 @@ class _AppShellState extends ConsumerState<AppShell>
       if (isFirstSync && !wasNewUser && mounted) {
         ref.read(syncStateProvider.notifier).reset();
       }
+    } finally {
+      // 🔒 安全网：无论何种退出路径（早期 return / 异常 / 正常完成），
+      // 确保进度条最终被关闭，避免「进度条一直不停」的死锁状态。
+      // 触发场景：AuthGate 因 JWT 刷新竞态重建 AppShell → mounted 变 false →
+      // _initialize() 中途 return → 进度条残留为 syncing。
+      // 注意：不检查 mounted，因为即便 widget 已释放，syncState 是全局单例，
+      // 残留的 syncing/done 状态会影响下次 AppShell 创建时的进度条显示。
+      if (isFirstSync) {
+        final s = ref.read(syncStateProvider);
+        if (s.phase != SyncPhase.idle) {
+          ref.read(syncStateProvider.notifier).reset();
+        }
+      }
     }
   }
 
   void _onTabChange(int index) {
     setState(() => _currentIndex = index);
+  }
+
+  /// 快照当前活跃分类 ID 集合（pull 前调用，用于后续清理识别本地残留）
+  Future<Set<String>> _snapshotActiveCategoryIds(AppDatabase db) async {
+    final rows = await (db.select(db.categories)
+          ..where((t) => t.deleted.equals(false)))
+        .get();
+    return rows.map((r) => r.id).toSet();
+  }
+
+  /// 快照当前活跃账户 ID 集合
+  Future<Set<String>> _snapshotActiveAccountIds(AppDatabase db) async {
+    final rows = await (db.select(db.accounts)
+          ..where((t) => t.deleted.equals(false)))
+        .get();
+    return rows.map((r) => r.id).toSet();
+  }
+
+  /// 清理快照中无流水引用的本地残留分类/账户
+  ///
+  /// 原则：登录后以云端数据为主。
+  /// - 快照内的 ID → 本地模式/种子残留，无流水则软删除（不推同步队列）
+  /// - 快照外的 ID → 云端拉取的数据，保留不动
+  /// - 系统保留分类（「其他」「其他收入」）跳过
+  /// - 有活跃子分类的父级跳过（子分类仍需要它做层级锚点）
+  Future<void> _cleanupUnusedLocalData(
+    AppDatabase db,
+    Set<String> localCategoryIds,
+    Set<String> localAccountIds,
+    String currentUserId,
+  ) async {
+    // ── 1. 清理无流水的本地残留分类 ──
+    for (final id in localCategoryIds) {
+      // 检查分类是否仍存在（可能已被 dedup 软删除）
+      final cat = await (db.select(db.categories)
+            ..where((t) => t.id.equals(id) & t.deleted.equals(false)))
+          .getSingleOrNull();
+      if (cat == null) continue;
+
+      // 云端同步过来的分类全部保留，不纳入"本地残留"清理
+      if (cat.userId == currentUserId) continue;
+
+      // 跳过系统保留分类
+      if ((cat.name == '其他' && cat.kind == 'expense') ||
+          (cat.name == '其他收入' && cat.kind == 'income')) {
+        continue;
+      }
+
+      // 有活跃子分类 → 保留父级（子分类的层级锚点不能断）
+      final subCount = await _countActiveSubCategories(db, id);
+      if (subCount > 0) continue;
+
+      // 查直接流水引用数
+      final recordCount = await _countRecordsByCategory(db, id);
+      if (recordCount > 0) continue;
+
+      // 软删除：deleted=true, syncStatus=synced（不推同步队列，避免在云端
+      // 创建 deleted=true 的幽灵行；若云端原有此分类则下次 pull 会 LWW 恢复）
+      await (db.update(db.categories)..where((t) => t.id.equals(id))).write(
+        CategoriesCompanion(
+          deleted: const Value(true),
+          updatedAt: Value(DateTime.now()),
+          syncStatus: const Value('synced'),
+        ),
+      );
+    }
+
+    // ── 2. 清理无流水的本地残留账户 ──
+    for (final id in localAccountIds) {
+      final acct = await (db.select(db.accounts)
+            ..where((t) => t.id.equals(id) & t.deleted.equals(false)))
+          .getSingleOrNull();
+      if (acct == null) continue;
+
+      // 云端同步过来的账户全部保留，不纳入"本地残留"清理
+      if (acct.userId == currentUserId) continue;
+
+      // 查流水引用数（作为出入金账户 + 转账对方账户）
+      final recordCount = await _countRecordsByAccount(db, id);
+      if (recordCount > 0) continue;
+
+      await (db.update(db.accounts)..where((t) => t.id.equals(id))).write(
+        AccountsCompanion(
+          deleted: const Value(true),
+          updatedAt: Value(DateTime.now()),
+          syncStatus: const Value('synced'),
+        ),
+      );
+    }
+  }
+
+  /// 查分类下的未删除流水数量
+  Future<int> _countRecordsByCategory(AppDatabase db, String categoryId) async {
+    final rows = await db
+        .customSelect(
+          'SELECT COUNT(*) as cnt FROM records WHERE category_id = ? AND deleted = 0',
+          variables: [Variable.withString(categoryId)],
+          readsFrom: {db.records},
+        )
+        .get();
+    return rows.first.read<int>('cnt');
+  }
+
+  /// 查账户关联的未删除流水数量（作为出入金账户或转账对方账户）
+  Future<int> _countRecordsByAccount(AppDatabase db, String accountId) async {
+    final rows = await db
+        .customSelect(
+          'SELECT COUNT(*) as cnt FROM records '
+          'WHERE (account_id = ? OR to_account_id = ?) AND deleted = 0',
+          variables: [
+            Variable.withString(accountId),
+            Variable.withString(accountId),
+          ],
+          readsFrom: {db.records},
+        )
+        .get();
+    return rows.first.read<int>('cnt');
+  }
+
+  /// 查分类下的活跃（未删除）子分类数量
+  Future<int> _countActiveSubCategories(AppDatabase db, String parentId) async {
+    final rows = await db
+        .customSelect(
+          'SELECT COUNT(*) as cnt FROM categories WHERE parent_id = ? AND deleted = 0',
+          variables: [Variable.withString(parentId)],
+          readsFrom: {db.categories},
+        )
+        .get();
+    return rows.first.read<int>('cnt');
   }
 
   void _onRecordTap() {
